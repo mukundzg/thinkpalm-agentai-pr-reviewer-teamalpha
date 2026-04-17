@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 pydantic
+cryptography
 python-dotenv
 langgraph
 langchain-core

@@ -12,6 +12,67 @@ def _db_path() -> str:
     return os.getenv("SQLITE_DB_PATH", "./review_results.db")
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    return {str(row[1]) for row in cur.fetchall()}
+
+
+def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
+    cols = _table_columns(conn, "agent_runs")
+    if "project_id" not in cols:
+        conn.execute("ALTER TABLE agent_runs ADD COLUMN project_id INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_project_id ON agent_runs(project_id)")
+
+    cols = _table_columns(conn, "pr_actions")
+    if "project_id" not in cols:
+        conn.execute("ALTER TABLE pr_actions ADD COLUMN project_id INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pr_actions_project_id ON pr_actions(project_id)")
+
+    cols = _table_columns(conn, "review_results")
+    if "project_id" not in cols:
+        conn.execute("ALTER TABLE review_results ADD COLUMN project_id INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_review_results_project_id ON review_results(project_id)")
+
+
+def _bootstrap_project_from_env() -> None:
+    from backend.secrets_crypto import encrypt_secret, is_encryption_configured
+
+    auto = os.getenv("AUTO_BOOTSTRAP_ENV_PROJECT", "").strip().lower()
+    if auto not in ("1", "true", "yes"):
+        return
+    if not is_encryption_configured():
+        return
+    repo = os.getenv("GITHUB_REPO", "").strip()
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if not repo or not token:
+        return
+    try:
+        tok_e = encrypt_secret(token)
+    except Exception:
+        return
+    wh = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
+    wh_e: str | None
+    if wh:
+        try:
+            wh_e = encrypt_secret(wh)
+        except Exception:
+            wh_e = None
+    else:
+        wh_e = None
+    with sqlite3.connect(_db_path()) as conn:
+        row = conn.execute("SELECT COUNT(*) FROM github_projects").fetchone()
+        if row and int(row[0]) > 0:
+            return
+        conn.execute(
+            """
+            INSERT INTO github_projects (full_name, github_token_encrypted, webhook_secret_encrypted)
+            VALUES (?, ?, ?)
+            """,
+            (repo, tok_e, wh_e),
+        )
+        conn.commit()
+
+
 def init_db() -> None:
     with sqlite3.connect(_db_path()) as conn:
         conn.execute(
@@ -129,21 +190,37 @@ def init_db() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pr_actions_pr_id ON pr_actions(pr_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pr_actions_run_id ON pr_actions(run_id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS github_projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL UNIQUE,
+                github_token_encrypted TEXT,
+                webhook_secret_encrypted TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_github_projects_full_name ON github_projects(full_name)")
+        _apply_schema_migrations(conn)
         conn.commit()
+    _bootstrap_project_from_env()
 
 
-def save_review_result(pr_id: str, result_payload: dict[str, Any]) -> None:
+def save_review_result(pr_id: str, result_payload: dict[str, Any], project_id: int | None = None) -> None:
     serializable_payload = jsonable_encoder(result_payload)
     with sqlite3.connect(_db_path()) as conn:
         conn.execute(
             """
-            INSERT INTO review_results (pr_id, result_json, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO review_results (pr_id, result_json, project_id, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(pr_id) DO UPDATE SET
                 result_json=excluded.result_json,
+                project_id=COALESCE(excluded.project_id, review_results.project_id),
                 updated_at=CURRENT_TIMESTAMP
             """,
-            (pr_id, json.dumps(serializable_payload)),
+            (pr_id, json.dumps(serializable_payload), project_id),
         )
         conn.commit()
 
@@ -162,14 +239,14 @@ def get_review_result(pr_id: str) -> dict[str, Any] | None:
         return {"raw_result": row[0]}
 
 
-def create_agent_run(pr_id: str, repo: str, pr_number: int) -> int:
+def create_agent_run(pr_id: str, repo: str, pr_number: int, project_id: int | None = None) -> int:
     with sqlite3.connect(_db_path()) as conn:
         cur = conn.execute(
             """
-            INSERT INTO agent_runs (pr_id, repo, pr_number, status)
-            VALUES (?, ?, ?, 'running')
+            INSERT INTO agent_runs (pr_id, repo, pr_number, status, project_id)
+            VALUES (?, ?, ?, 'running', ?)
             """,
-            (pr_id, repo, pr_number),
+            (pr_id, repo, pr_number, project_id),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -301,7 +378,7 @@ def _get_decision_run_payload(run_id: int) -> dict[str, Any] | None:
         conn.row_factory = sqlite3.Row
         run_row = conn.execute(
             """
-            SELECT id, pr_id, repo, pr_number, status, started_at, finished_at
+            SELECT id, pr_id, repo, pr_number, status, started_at, finished_at, project_id
             FROM agent_runs
             WHERE id = ?
             """,
@@ -411,6 +488,7 @@ def _get_decision_run_payload(run_id: int) -> dict[str, Any] | None:
             "status": run_row["status"],
             "started_at": run_row["started_at"],
             "finished_at": run_row["finished_at"],
+            "project_id": run_row["project_id"],
         },
         "steps": output_steps,
     }
@@ -438,24 +516,42 @@ def get_decision_run_by_id(run_id: int) -> dict[str, Any] | None:
     return _get_decision_run_payload(run_id)
 
 
-def get_pr_history_summary(limit: int = 100) -> list[dict[str, Any]]:
+def get_pr_history_summary(limit: int = 100, project_id: int | None = None) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 500))
     with sqlite3.connect(_db_path()) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT ar.id, ar.pr_id, ar.repo, ar.pr_number, ar.status, ar.started_at, ar.finished_at
-            FROM agent_runs ar
-            INNER JOIN (
-                SELECT pr_id, MAX(id) AS latest_id
-                FROM agent_runs
-                GROUP BY pr_id
-            ) latest ON latest.latest_id = ar.id
-            ORDER BY ar.id DESC
-            LIMIT ?
-            """,
-            (safe_limit,),
-        ).fetchall()
+        if project_id is None:
+            rows = conn.execute(
+                """
+                SELECT ar.id, ar.pr_id, ar.repo, ar.pr_number, ar.status, ar.started_at, ar.finished_at, ar.project_id
+                FROM agent_runs ar
+                INNER JOIN (
+                    SELECT pr_id, MAX(id) AS latest_id
+                    FROM agent_runs
+                    GROUP BY pr_id
+                ) latest ON latest.latest_id = ar.id
+                ORDER BY ar.id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ar.id, ar.pr_id, ar.repo, ar.pr_number, ar.status, ar.started_at, ar.finished_at, ar.project_id
+                FROM agent_runs ar
+                INNER JOIN (
+                    SELECT pr_id, MAX(id) AS latest_id
+                    FROM agent_runs
+                    WHERE project_id = ?
+                    GROUP BY pr_id
+                ) latest ON latest.latest_id = ar.id
+                WHERE ar.project_id = ?
+                ORDER BY ar.id DESC
+                LIMIT ?
+                """,
+                (project_id, project_id, safe_limit),
+            ).fetchall()
     return [
         {
             "run_id": row["id"],
@@ -465,24 +561,37 @@ def get_pr_history_summary(limit: int = 100) -> list[dict[str, Any]]:
             "status": row["status"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
+            "project_id": row["project_id"],
         }
         for row in rows
     ]
 
 
-def get_analysis_history(limit: int = 200) -> list[dict[str, Any]]:
+def get_analysis_history(limit: int = 200, project_id: int | None = None) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 1000))
     with sqlite3.connect(_db_path()) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT id, pr_id, repo, pr_number, status, started_at, finished_at
-            FROM agent_runs
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (safe_limit,),
-        ).fetchall()
+        if project_id is None:
+            rows = conn.execute(
+                """
+                SELECT id, pr_id, repo, pr_number, status, started_at, finished_at, project_id
+                FROM agent_runs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, pr_id, repo, pr_number, status, started_at, finished_at, project_id
+                FROM agent_runs
+                WHERE project_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (project_id, safe_limit),
+            ).fetchall()
     return [
         {
             "run_id": row["id"],
@@ -492,6 +601,7 @@ def get_analysis_history(limit: int = 200) -> list[dict[str, Any]]:
             "status": row["status"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
+            "project_id": row["project_id"],
         }
         for row in rows
     ]
@@ -507,14 +617,15 @@ def log_pr_action(
     actor: str = "system",
     details: str | None = None,
     run_id: int | None = None,
+    project_id: int | None = None,
 ) -> int:
     with sqlite3.connect(_db_path()) as conn:
         cur = conn.execute(
             """
             INSERT INTO pr_actions (
-                pr_id, repo, pr_number, action_type, action_status, actor, details, run_id
+                pr_id, repo, pr_number, action_type, action_status, actor, details, run_id, project_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 pr_id,
@@ -525,6 +636,7 @@ def log_pr_action(
                 actor,
                 details,
                 run_id,
+                project_id,
             ),
         )
         conn.commit()
@@ -537,7 +649,7 @@ def get_pr_actions(pr_id: str, limit: int = 200) -> list[dict[str, Any]]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT id, pr_id, repo, pr_number, action_type, action_status, actor, details, run_id, created_at
+            SELECT id, pr_id, repo, pr_number, action_type, action_status, actor, details, run_id, project_id, created_at
             FROM pr_actions
             WHERE pr_id = ?
             ORDER BY id DESC
@@ -556,7 +668,117 @@ def get_pr_actions(pr_id: str, limit: int = 200) -> list[dict[str, Any]]:
             "actor": row["actor"],
             "details": row["details"],
             "run_id": row["run_id"],
+            "project_id": row["project_id"],
             "created_at": row["created_at"],
         }
         for row in rows
     ]
+
+
+def list_projects_public() -> list[dict[str, Any]]:
+    """List configured GitHub projects without secret material."""
+    with sqlite3.connect(_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, full_name, created_at, updated_at,
+                   CASE WHEN github_token_encrypted IS NOT NULL AND TRIM(github_token_encrypted) != '' THEN 1 ELSE 0 END AS has_github_token,
+                   CASE WHEN webhook_secret_encrypted IS NOT NULL AND TRIM(webhook_secret_encrypted) != '' THEN 1 ELSE 0 END AS has_webhook_secret
+            FROM github_projects
+            ORDER BY full_name ASC
+            """
+        ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "full_name": row["full_name"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "has_github_token": bool(row["has_github_token"]),
+            "has_webhook_secret": bool(row["has_webhook_secret"]),
+        }
+        for row in rows
+    ]
+
+
+def get_githubproject_row_by_id(project_id: int) -> dict[str, Any] | None:
+    with sqlite3.connect(_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, full_name, github_token_encrypted, webhook_secret_encrypted, created_at, updated_at
+            FROM github_projects
+            WHERE id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return dict(row)
+
+
+def get_githubproject_row_by_full_name(full_name: str) -> dict[str, Any] | None:
+    with sqlite3.connect(_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, full_name, github_token_encrypted, webhook_secret_encrypted, created_at, updated_at
+            FROM github_projects
+            WHERE full_name = ?
+            """,
+            (full_name.strip(),),
+        ).fetchone()
+    if not row:
+        return None
+    return dict(row)
+
+
+def insert_github_project(*, full_name: str, github_token_encrypted: str, webhook_secret_encrypted: str) -> int:
+    fn = full_name.strip()
+    if not fn:
+        raise ValueError("full_name is required")
+    with sqlite3.connect(_db_path()) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO github_projects (full_name, github_token_encrypted, webhook_secret_encrypted, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (fn, github_token_encrypted or None, webhook_secret_encrypted or None),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def update_github_project(
+    project_id: int,
+    *,
+    github_token_encrypted: str | None = None,
+    webhook_secret_encrypted: str | None = None,
+    unset_webhook_secret: bool = False,
+) -> None:
+    sets: list[str] = []
+    params: list[Any] = []
+    if github_token_encrypted is not None:
+        sets.append("github_token_encrypted = ?")
+        params.append(github_token_encrypted)
+    if webhook_secret_encrypted is not None:
+        sets.append("webhook_secret_encrypted = ?")
+        params.append(webhook_secret_encrypted)
+    elif unset_webhook_secret:
+        sets.append("webhook_secret_encrypted = NULL")
+    if not sets:
+        return
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    params.append(project_id)
+    with sqlite3.connect(_db_path()) as conn:
+        conn.execute(
+            f"UPDATE github_projects SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+        conn.commit()
+
+
+def delete_github_project(project_id: int) -> None:
+    with sqlite3.connect(_db_path()) as conn:
+        conn.execute("DELETE FROM github_projects WHERE id = ?", (project_id,))
+        conn.commit()

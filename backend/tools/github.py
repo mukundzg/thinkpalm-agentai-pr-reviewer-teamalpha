@@ -9,21 +9,21 @@ import requests
 from backend.models import ReviewInput
 
 
-def get_github_client() -> Github:
-    token = os.getenv("GITHUB_TOKEN", "")
-    if not token:
-        raise ValueError("GITHUB_TOKEN is required.")
-    return Github(token)
+def get_github_client(token: str | None = None) -> Github:
+    tok = (token if token is not None else os.getenv("GITHUB_TOKEN", "")).strip()
+    if not tok:
+        raise ValueError("GitHub token is required.")
+    return Github(tok)
 
 
-def fetch_pr_data(repo_name: str, pr_number: int) -> ReviewInput:
-    gh = get_github_client()
+def fetch_pr_data(repo_name: str, pr_number: int, *, token: str | None = None) -> ReviewInput:
+    gh = get_github_client(token)
     repo = gh.get_repo(repo_name)
     pr = repo.get_pull(pr_number)
-    token = os.getenv("GITHUB_TOKEN", "")
+    auth_tok = (token if token is not None else os.getenv("GITHUB_TOKEN", "")).strip()
     headers = {
         "Accept": "application/vnd.github.v3.diff",
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {auth_tok}",
     }
     response = requests.get(pr.diff_url, headers=headers, timeout=20)
     response.raise_for_status()
@@ -38,8 +38,8 @@ def fetch_pr_data(repo_name: str, pr_number: int) -> ReviewInput:
     )
 
 
-def fetch_pr_file_patches(repo_name: str, pr_number: int) -> dict[str, Any]:
-    gh = get_github_client()
+def fetch_pr_file_patches(repo_name: str, pr_number: int, *, token: str | None = None) -> dict[str, Any]:
+    gh = get_github_client(token)
     repo = gh.get_repo(repo_name)
     pr = repo.get_pull(pr_number)
 
@@ -63,8 +63,8 @@ def fetch_pr_file_patches(repo_name: str, pr_number: int) -> dict[str, Any]:
     return {"files": files_payload, "combined_diff": "\n".join(patch_blocks), "title": pr.title or ""}
 
 
-def fetch_open_prs(repo_name: str, limit: int = 20) -> list[dict[str, Any]]:
-    gh = get_github_client()
+def fetch_open_prs(repo_name: str, limit: int = 20, *, token: str | None = None) -> list[dict[str, Any]]:
+    gh = get_github_client(token)
     repo = gh.get_repo(repo_name)
     pulls = repo.get_pulls(state="open", sort="updated", direction="desc")
     output: list[dict[str, Any]] = []
@@ -85,8 +85,16 @@ def fetch_open_prs(repo_name: str, limit: int = 20) -> list[dict[str, Any]]:
     return output
 
 
-def post_pr_comment(repo_name: str, pr_number: int, body: str) -> None:
-    gh = get_github_client()
+def post_pr_comment(repo_name: str, pr_number: int, body: str, *, token: str | None = None) -> None:
+    gh = get_github_client(token)
     repo = gh.get_repo(repo_name)
     pr = repo.get_pull(pr_number)
     pr.create_issue_comment(body)
+
+
+def approve_pull_request(repo_name: str, pr_number: int, *, token: str | None = None) -> None:
+    gh = get_github_client(token)
+    repo = gh.get_repo(repo_name)
+    pr = repo.get_pull(pr_number)
+    head_commit = repo.get_commit(pr.head.sha)
+    pr.create_review(event="APPROVE", commit=head_commit)
