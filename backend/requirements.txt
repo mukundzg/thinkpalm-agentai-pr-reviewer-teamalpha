@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+langgraph
+langchain-core
+chromadb
+openai
+PyGithub
+requests
+pytest
