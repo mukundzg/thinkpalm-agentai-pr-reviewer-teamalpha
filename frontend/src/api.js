@@ -39,6 +39,30 @@ export async function fetchResult(prId) {
   return res.json();
 }
 
+export async function fetchDecisionHistory(prId) {
+  const res = await fetch(`${API_BASE}/decisions/pr/${encodeURIComponent(prId)}`);
+  if (!res.ok) {
+    throw new Error(await parseError(res, "Decision history fetch failed"));
+  }
+  return res.json();
+}
+
+export async function fetchPrHistory(limit = 100) {
+  const res = await fetch(`${API_BASE}/decisions/history/runs?limit=${encodeURIComponent(limit)}`);
+  if (!res.ok) {
+    throw new Error(await parseError(res, "PR history fetch failed"));
+  }
+  return res.json();
+}
+
+export async function fetchDecisionHistoryByRun(runId) {
+  const res = await fetch(`${API_BASE}/decisions/run/${encodeURIComponent(runId)}`);
+  if (!res.ok) {
+    throw new Error(await parseError(res, "Decision flow fetch failed"));
+  }
+  return res.json();
+}
+
 export async function fetchDefaultPr() {
   const res = await fetch(`${API_BASE}/github/default-pr`);
   if (!res.ok) {

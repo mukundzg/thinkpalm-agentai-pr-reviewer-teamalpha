@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchDefaultPr, fetchOpenPrs, fetchPrDetails, fetchResult, postPrComment, triggerManualReview } from "./api";
+import {
+  fetchDecisionHistory,
+  fetchDecisionHistoryByRun,
+  fetchDefaultPr,
+  fetchOpenPrs,
+  fetchPrDetails,
+  fetchPrHistory,
+  fetchResult,
+  postPrComment,
+  triggerManualReview
+} from "./api";
 import "./App.css";
 
 const sampleDiff = `diff --git a/example.py b/example.py
@@ -69,6 +79,10 @@ export default function App() {
   const [fetchProgress, setFetchProgress] = useState({ value: 0, label: "" });
   const [isPrModalOpen, setIsPrModalOpen] = useState(false);
   const [openPrs, setOpenPrs] = useState([]);
+  const [isDecisionModalOpen, setIsDecisionModalOpen] = useState(false);
+  const [decisionHistory, setDecisionHistory] = useState(null);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const [prHistoryItems, setPrHistoryItems] = useState([]);
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -242,6 +256,94 @@ export default function App() {
     }
   }
 
+  async function onShowDecisionFlow() {
+    if (!form.pr_id) {
+      setError("Select a PR first to view decision history.");
+      return;
+    }
+    setLoadingAction("decision-flow");
+    setError("");
+    startProgress("fetch");
+    try {
+      const history = await fetchDecisionHistory(form.pr_id);
+      setDecisionHistory(history);
+      setIsDecisionModalOpen(true);
+      finishProgress("fetch", "Decision flow loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setError(err.message || "Failed to load decision history.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onShowPrHistory() {
+    setLoadingAction("pr-history");
+    setError("");
+    startProgress("fetch");
+    try {
+      const response = await fetchPrHistory(300);
+      const items = Array.isArray(response?.items) ? response.items : [];
+      setPrHistoryItems(items);
+      setIsHistoryModalOpen(true);
+      finishProgress("fetch", "PR history loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setError(err.message || "Failed to load PR history.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  function onPickHistoryItem(item) {
+    if (!item?.run_id) {
+      return;
+    }
+    setLoadingAction("decision-flow");
+    setError("");
+    startProgress("fetch");
+    fetchDecisionHistoryByRun(item.run_id)
+      .then((history) => {
+        setDecisionHistory(history);
+        setForm((prev) => ({
+          ...prev,
+          pr_id: item?.pr_id || prev.pr_id,
+          repo: item?.repo || prev.repo,
+          pr_number: item?.pr_number ?? prev.pr_number
+        }));
+        setIsHistoryModalOpen(false);
+        setIsDecisionModalOpen(true);
+        finishProgress("fetch", "Decision flow loaded");
+      })
+      .catch((err) => {
+        finishProgress("fetch", "Load failed");
+        setError(err.message || "Failed to load selected analysis flow.");
+      })
+      .finally(() => {
+        setLoadingAction("");
+      });
+  }
+
+  function formatRunStatus(status) {
+    const normalized = String(status || "").toLowerCase();
+    if (normalized === "completed") {
+      return "pass";
+    }
+    if (normalized === "failed") {
+      return "fail";
+    }
+    return "neutral";
+  }
+
+  function formatRunLabel(status) {
+    return String(status || "unknown").toUpperCase();
+  }
+
+  function renderRunTime(item) {
+    const finished = item?.finished_at ? `Finished: ${item.finished_at}` : "Finished: -";
+    return `Started: ${item?.started_at || "-"} | ${finished}`;
+  }
+
   const issues = Array.isArray(result?.issues) ? result.issues : [];
   const reviewInput = result?.review_input || {};
   const testOutput = result?.test_output || {};
@@ -275,8 +377,20 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="hero">
-        <h1>AgentAI PR Reviewer</h1>
-        <p>Intelligent multi-agent orchestration for autonomous pull request analysis and correction.</p>
+        <div className="hero-row">
+          <div>
+            <h1>AgentAI PR Reviewer</h1>
+            <p>Intelligent multi-agent orchestration for autonomous pull request analysis and correction.</p>
+          </div>
+          <div className="hero-actions">
+            <button className="btn hero-btn" onClick={onShowPrHistory} disabled={Boolean(loadingAction) || bootstrapping}>
+              {loadingAction === "pr-history" ? "Loading History..." : "PR History"}
+            </button>
+            <button className="btn hero-btn" onClick={onShowDecisionFlow} disabled={Boolean(loadingAction) || bootstrapping}>
+              {loadingAction === "decision-flow" ? "Loading Flow..." : "View Decision Flow"}
+            </button>
+          </div>
+        </div>
       </header>
 
       <aside className="sidebar">
@@ -542,6 +656,93 @@ export default function App() {
                   >
                     <span className="pr-title">#{pr.number} {pr.title || "Untitled PR"}</span>
                     <span className="pr-meta">{pr.repo}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isDecisionModalOpen && (
+        <div className="modal-backdrop" onClick={() => setIsDecisionModalOpen(false)}>
+          <div className="modal decision-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Agent Decision Flow</h3>
+              <button className="btn modal-close" onClick={() => setIsDecisionModalOpen(false)}>Close</button>
+            </div>
+            <div className="modal-body">
+              {decisionHistory?.run ? (
+                <>
+                  <div className="decision-overview">
+                    <span><strong>PR:</strong> {decisionHistory.run.pr_id}</span>
+                    <span><strong>Run ID:</strong> {decisionHistory.run.id}</span>
+                    <span><strong>Status:</strong> {String(decisionHistory.run.status || "").toUpperCase()}</span>
+                  </div>
+                  <div className="decision-rail">
+                    {(decisionHistory.steps || []).map((step) => (
+                      <article className="decision-card" key={step.id}>
+                        <div className="decision-card-head">
+                          <span className="decision-step-chip">Step {step.step_order}</span>
+                          <span className={`status-badge ${step.severity === "high" || step.severity === "critical" ? "fail" : step.severity === "medium" ? "neutral" : "pass"}`}>
+                            {String(step.agent_name || "").toUpperCase()}
+                          </span>
+                        </div>
+                        <p className="decision-line"><strong>Decision:</strong> {step.decision_type}</p>
+                        <p className="decision-line"><strong>Goal:</strong> {step.decision_goal}</p>
+                        <p className="decision-line"><strong>Why:</strong> {step.selection_reason}</p>
+                        <p className="decision-line"><strong>Chosen:</strong> {step.selected_option}</p>
+                        {step.next_action ? <p className="decision-line"><strong>Next:</strong> {step.next_action}</p> : null}
+                        <div className="decision-grid">
+                          <div className="decision-cell">
+                            <h4>Signals</h4>
+                            {(step.signals || []).length ? (
+                              step.signals.map((sig, idx) => (
+                                <p key={`${step.id}-sig-${idx}`}>{sig.signal_type}: {sig.signal_value}</p>
+                              ))
+                            ) : <p>None</p>}
+                          </div>
+                          <div className="decision-cell">
+                            <h4>Policies</h4>
+                            {(step.policy_checks || []).length ? (
+                              step.policy_checks.map((pol, idx) => (
+                                <p key={`${step.id}-pol-${idx}`}>{pol.policy_name}: {pol.result}</p>
+                              ))
+                            ) : <p>None</p>}
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <p style={{ color: "var(--color-fg-muted)" }}>No decision history available for this PR.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isHistoryModalOpen && (
+        <div className="modal-backdrop" onClick={() => setIsHistoryModalOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Analysis History (All Runs)</h3>
+              <button className="btn modal-close" onClick={() => setIsHistoryModalOpen(false)}>Close</button>
+            </div>
+            <div className="modal-body">
+              {prHistoryItems.length === 0 ? (
+                <p style={{ color: "var(--color-fg-muted)" }}>No analyzed PR history found yet.</p>
+              ) : (
+                prHistoryItems.map((item) => (
+                  <button key={`${item.pr_id}-${item.run_id}`} className="pr-row" onClick={() => onPickHistoryItem(item)}>
+                    <span className="pr-title">{item.pr_id} <span style={{ color: "var(--color-fg-muted)", fontWeight: 500 }}>| Run #{item.run_id}</span></span>
+                    <span className="pr-meta">
+                      Status: {formatRunLabel(item.status)} | {renderRunTime(item)}
+                    </span>
+                    <span style={{ marginTop: "0.25rem" }}>
+                      <span className={`status-badge ${formatRunStatus(item.status)}`}>{formatRunLabel(item.status)}</span>
+                    </span>
                   </button>
                 ))
               )}
