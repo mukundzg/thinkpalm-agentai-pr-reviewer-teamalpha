@@ -1,5 +1,7 @@
 # Python
 __pycache__/
+backend/**/__pycache__/
+frontend/**/__pycache__/
 *.py[cod]
 *.pyo
 *.pyd
@@ -39,3 +41,11 @@ coverage/
 
 # Environment files
 .env
+
+# SQLite
+*.db
+*.sqlite
+*.sqlite3
+
+# Chroma (local vector store, created at runtime)
+.chroma/
