@@ -14,7 +14,19 @@ from pydantic import BaseModel
 
 from backend.graph.workflow import build_workflow
 from backend.models import ReviewInput, WorkflowState
-from backend.sqlite_store import get_review_result, init_db, save_review_result
+from backend.sqlite_store import (
+    complete_agent_run,
+    create_agent_run,
+    get_analysis_history,
+    get_pr_actions,
+    get_decision_run_by_id,
+    get_latest_decision_run,
+    get_pr_history_summary,
+    get_review_result,
+    init_db,
+    log_pr_action,
+    save_review_result,
+)
 from backend.tools.github import fetch_open_prs, fetch_pr_file_patches, post_pr_comment
 
 load_dotenv()
@@ -47,6 +59,16 @@ class PostCommentPayload(BaseModel):
     body: str
 
 
+class PrActionPayload(BaseModel):
+    repo: str
+    pr_number: int
+    action_type: str
+    action_status: str = "success"
+    actor: str = "user"
+    details: str = ""
+    run_id: int | None = None
+
+
 def _verify_github_signature(raw_body: bytes, signature_header: str | None) -> None:
     secret = os.getenv("GITHUB_WEBHOOK_SECRET", "")
     if not secret:
@@ -60,16 +82,24 @@ def _verify_github_signature(raw_body: bytes, signature_header: str | None) -> N
 
 
 def _run_review(review_input: ReviewInput) -> dict[str, Any]:
+    run_id = create_agent_run(review_input.pr_id, review_input.repo, review_input.pr_number)
     initial_state = WorkflowState(review_input=review_input)
-    final_state = workflow.invoke(initial_state)
-    if isinstance(final_state, WorkflowState):
-        payload = final_state.model_dump()
-    elif isinstance(final_state, dict):
-        payload = final_state
-    else:
-        payload = {"result": str(final_state)}
-    save_review_result(review_input.pr_id, payload)
-    return payload
+    initial_state.metadata["decision_run_id"] = run_id
+    initial_state.metadata["decision_step_order"] = 0
+    try:
+        final_state = workflow.invoke(initial_state)
+        if isinstance(final_state, WorkflowState):
+            payload = final_state.model_dump()
+        elif isinstance(final_state, dict):
+            payload = final_state
+        else:
+            payload = {"result": str(final_state)}
+        save_review_result(review_input.pr_id, payload)
+        complete_agent_run(run_id, "completed")
+        return payload
+    except Exception:
+        complete_agent_run(run_id, "failed")
+        raise
 
 
 def _parse_github_event(raw_body: bytes, content_type: str | None) -> dict[str, Any]:
@@ -132,8 +162,25 @@ async def github_webhook(
     output = _run_review(review_input)
     try:
         post_pr_comment(review_input.repo, review_input.pr_number, output.get("final_comment", ""))
+        log_pr_action(
+            pr_id=review_input.pr_id,
+            repo=review_input.repo,
+            pr_number=review_input.pr_number,
+            action_type="comment_added",
+            action_status="success",
+            actor="system",
+            details="Auto-posted final comment after webhook-triggered analysis.",
+        )
     except Exception:
-        pass
+        log_pr_action(
+            pr_id=review_input.pr_id,
+            repo=review_input.repo,
+            pr_number=review_input.pr_number,
+            action_type="comment_added",
+            action_status="failed",
+            actor="system",
+            details="Auto-comment failed after webhook-triggered analysis.",
+        )
     return {"status": "ok", "pr_id": review_input.pr_id}
 
 
@@ -156,7 +203,40 @@ async def publish_pr_comment(payload: PostCommentPayload):
         raise HTTPException(status_code=400, detail="Comment body is required.")
 
     post_pr_comment(repo_name, payload.pr_number, comment_body)
+    log_pr_action(
+        pr_id=f"{repo_name}#{payload.pr_number}",
+        repo=repo_name,
+        pr_number=payload.pr_number,
+        action_type="comment_added",
+        action_status="success",
+        actor="user",
+        details="Manual comment posted from UI action.",
+    )
     return {"status": "ok", "message": f"Comment posted to {repo_name}#{payload.pr_number}"}
+
+
+@app.post("/actions/log")
+async def record_pr_action(payload: PrActionPayload):
+    repo_name = payload.repo.strip()
+    if not repo_name:
+        raise HTTPException(status_code=400, detail="Repository is required.")
+    if payload.pr_number <= 0:
+        raise HTTPException(status_code=400, detail="PR number must be greater than zero.")
+    action_type = payload.action_type.strip().lower()
+    if not action_type:
+        raise HTTPException(status_code=400, detail="Action type is required.")
+    action_status = payload.action_status.strip().lower() or "success"
+    action_id = log_pr_action(
+        pr_id=f"{repo_name}#{payload.pr_number}",
+        repo=repo_name,
+        pr_number=payload.pr_number,
+        action_type=action_type,
+        action_status=action_status,
+        actor=payload.actor.strip() or "user",
+        details=payload.details.strip() or None,
+        run_id=payload.run_id,
+    )
+    return {"status": "ok", "action_id": action_id}
 
 
 @app.get("/results/{pr_id:path}")
@@ -165,6 +245,37 @@ async def get_results(pr_id: str):
     if result is None:
         raise HTTPException(status_code=404, detail="No results for this PR.")
     return result
+
+
+@app.get("/decisions/history/prs")
+async def get_pr_history(limit: int = 100):
+    return {"items": get_pr_history_summary(limit=limit)}
+
+
+@app.get("/decisions/history/runs")
+async def get_all_analysis_history(limit: int = 200):
+    return {"items": get_analysis_history(limit=limit)}
+
+
+@app.get("/actions/{pr_id:path}")
+async def get_actions_for_pr(pr_id: str, limit: int = 200):
+    return {"items": get_pr_actions(pr_id, limit=limit)}
+
+
+@app.get("/decisions/pr/{pr_id:path}")
+async def get_decision_history(pr_id: str):
+    history = get_latest_decision_run(pr_id)
+    if history is None:
+        raise HTTPException(status_code=404, detail="No decision history found for this PR.")
+    return history
+
+
+@app.get("/decisions/run/{run_id}")
+async def get_decision_history_by_run(run_id: int):
+    history = get_decision_run_by_id(run_id)
+    if history is None:
+        raise HTTPException(status_code=404, detail="No decision history found for this run.")
+    return history
 
 
 @app.get("/github/default-pr")
