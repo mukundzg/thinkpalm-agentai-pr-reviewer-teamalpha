@@ -8,7 +8,6 @@ from backend.models import WorkflowState
 def summary_agent(state: WorkflowState) -> WorkflowState:
     issues = state.issues
     fixed = state.fix_output
-    tested = state.test_output
 
     diff_snippet = fixed.patch if fixed and fixed.patch else "No patch generated."
     fallback_comment = "\n".join(
@@ -23,8 +22,6 @@ def summary_agent(state: WorkflowState) -> WorkflowState:
             "```",
             "",
             "### ⚠️ Notes",
-            f"- Tests: {tested.status if tested else 'not run'}",
-            f"- Errors: {', '.join(tested.errors) if tested and tested.errors else 'none'}",
             f"- Explanation: {fixed.changes_explained if fixed else 'no fix output'}",
         ]
     )
@@ -34,8 +31,6 @@ Format a clean GitHub PR comment using this data:
 - Auto-fix attempts: {state.attempts}
 - Patch:
 {diff_snippet[:3000]}
-- Test status: {tested.status if tested else 'not run'}
-- Test errors: {tested.errors if tested else []}
 - Explanation: {fixed.changes_explained if fixed else 'no fix output'}
 Use markdown headers and a diff block.
 """

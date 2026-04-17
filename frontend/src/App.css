@@ -288,5 +288,85 @@ pre {
   }
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(31, 35, 40, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+  padding: 1rem;
+}
+
+.modal {
+  width: min(680px, 100%);
+  max-height: 80vh;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-canvas-default);
+  box-shadow: 0 12px 30px rgba(31, 35, 40, 0.2);
+}
+
+.modal-header {
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--color-border-default);
+  background: var(--color-canvas-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.modal-close {
+  width: auto;
+  padding: 0.4rem 0.8rem;
+}
+
+.modal-body {
+  max-height: calc(80vh - 70px);
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.pr-row {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-canvas-default);
+  padding: 0.75rem 0.9rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.pr-row:hover:not(:disabled) {
+  border-color: var(--color-accent-fg);
+  background: #f6f8fa;
+}
+
+.pr-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-fg-default);
+}
+
+.pr-meta {
+  font-size: 0.78rem;
+  color: var(--color-fg-muted);
+}
+
 
 

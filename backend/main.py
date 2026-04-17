@@ -41,6 +41,12 @@ class ManualReviewPayload(BaseModel):
     diff: str
 
 
+class PostCommentPayload(BaseModel):
+    repo: str
+    pr_number: int
+    body: str
+
+
 def _verify_github_signature(raw_body: bytes, signature_header: str | None) -> None:
     secret = os.getenv("GITHUB_WEBHOOK_SECRET", "")
     if not secret:
@@ -138,6 +144,21 @@ async def manual_review(payload: ManualReviewPayload):
     return {"status": "ok", "result": output}
 
 
+@app.post("/github/post-comment")
+async def publish_pr_comment(payload: PostCommentPayload):
+    repo_name = payload.repo.strip()
+    comment_body = payload.body.strip()
+    if not repo_name:
+        raise HTTPException(status_code=400, detail="Repository is required.")
+    if payload.pr_number <= 0:
+        raise HTTPException(status_code=400, detail="PR number must be greater than zero.")
+    if not comment_body:
+        raise HTTPException(status_code=400, detail="Comment body is required.")
+
+    post_pr_comment(repo_name, payload.pr_number, comment_body)
+    return {"status": "ok", "message": f"Comment posted to {repo_name}#{payload.pr_number}"}
+
+
 @app.get("/results/{pr_id:path}")
 async def get_results(pr_id: str):
     result = get_review_result(pr_id)
@@ -163,5 +184,31 @@ async def get_default_pr():
         "repo": repo_name,
         "pr_number": selected["number"],
         "title": parsed.get("title", selected["title"]),
+        "diff": parsed.get("combined_diff", ""),
+    }
+
+
+@app.get("/github/open-prs")
+async def get_open_prs():
+    repo_name = os.getenv("GITHUB_REPO", "").strip()
+    if not repo_name:
+        raise HTTPException(status_code=400, detail="Set GITHUB_REPO in .env as owner/repo.")
+
+    prs = fetch_open_prs(repo_name, limit=100)
+    return {"repo": repo_name, "pull_requests": prs}
+
+
+@app.get("/github/pr/{pr_number}")
+async def get_pr_details(pr_number: int):
+    repo_name = os.getenv("GITHUB_REPO", "").strip()
+    if not repo_name:
+        raise HTTPException(status_code=400, detail="Set GITHUB_REPO in .env as owner/repo.")
+
+    parsed = fetch_pr_file_patches(repo_name, pr_number)
+    return {
+        "pr_id": f"{repo_name}#{pr_number}",
+        "repo": repo_name,
+        "pr_number": pr_number,
+        "title": parsed.get("title", ""),
         "diff": parsed.get("combined_diff", ""),
     }
