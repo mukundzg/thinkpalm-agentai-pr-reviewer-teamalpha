@@ -483,5 +483,147 @@ pre {
   margin-bottom: 0.2rem;
 }
 
+.hero-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
 
+.btn-settings {
+  font-size: 0.8rem;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-canvas-default);
+}
+
+.project-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-fg-muted);
+}
+
+.project-picker select {
+  min-width: 220px;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  font-size: 0.875rem;
+  background: var(--color-canvas-default);
+}
+
+.settings-modal .modal-body {
+  max-height: min(80vh, 560px);
+  overflow-y: auto;
+}
+
+.settings-project-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.settings-project-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--color-border-default);
+  font-size: 0.85rem;
+}
+
+.settings-project-meta {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--color-fg-muted);
+  margin-top: 0.2rem;
+  font-weight: 400;
+}
+
+.btn.danger-outline {
+  border-color: var(--color-danger-fg);
+  color: var(--color-danger-fg);
+  background: transparent;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.settings-add-form .form-group label {
+  font-size: 0.75rem;
+}
+
+.onboarding-fullscreen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  background: linear-gradient(160deg, #f0f4f8 0%, #f6f8fa 40%, #eaeef2 100%);
+}
+
+.onboarding-loading {
+  font-size: 1rem;
+  color: var(--color-fg-muted);
+}
+
+.onboarding-card {
+  max-width: 520px;
+  width: 100%;
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: 12px;
+  padding: 2rem 2.25rem;
+  box-shadow: 0 8px 24px rgba(1, 4, 9, 0.06);
+}
+
+.onboarding-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.onboarding-lead {
+  color: var(--color-fg-muted);
+  font-size: 0.95rem;
+  margin-bottom: 1.5rem;
+}
+
+.onboarding-step {
+  margin-top: 1.5rem;
+}
+
+.onboarding-step h2 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+.onboarding-copy {
+  font-size: 0.88rem;
+  color: var(--color-fg-muted);
+  line-height: 1.55;
+  margin-bottom: 1rem;
+}
+
+.onboarding-copy code {
+  font-size: 0.82rem;
+  padding: 0.1rem 0.35rem;
+  background: var(--color-canvas-subtle);
+  border-radius: 4px;
+}
+
+.onboarding-cta {
+  margin-top: 0.5rem;
+}
+
+.onboarding-form .form-group {
+  margin-bottom: 1rem;
+}
 
