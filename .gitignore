@@ -46,3 +46,6 @@ coverage/
 *.db
 *.sqlite
 *.sqlite3
+
+# Chroma (local vector store, created at runtime)
+.chroma/
