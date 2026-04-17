@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchDefaultPr, fetchResult, triggerManualReview } from "./api";
+import { fetchDefaultPr, fetchOpenPrs, fetchPrDetails, fetchResult, postPrComment, triggerManualReview } from "./api";
 import "./App.css";
 
 const sampleDiff = `diff --git a/example.py b/example.py
@@ -67,6 +67,8 @@ export default function App() {
   const [showRawJson, setShowRawJson] = useState(false);
   const [reviewProgress, setReviewProgress] = useState({ value: 0, label: "" });
   const [fetchProgress, setFetchProgress] = useState({ value: 0, label: "" });
+  const [isPrModalOpen, setIsPrModalOpen] = useState(false);
+  const [openPrs, setOpenPrs] = useState([]);
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -172,6 +174,74 @@ export default function App() {
     }
   }
 
+  async function onShowOpenPrs() {
+    setLoadingAction("open-prs");
+    setError("");
+    startProgress("fetch");
+    try {
+      const response = await fetchOpenPrs();
+      const items = Array.isArray(response?.pull_requests) ? response.pull_requests : [];
+      setOpenPrs(items);
+      setIsPrModalOpen(true);
+      finishProgress("fetch", "Open PR list loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setError(err.message || "Failed to fetch open PR list.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onSelectOpenPr(prNumber) {
+    setLoadingAction("select-pr");
+    setError("");
+    startProgress("fetch");
+    try {
+      const pr = await fetchPrDetails(prNumber);
+      setForm({
+        pr_id: pr.pr_id || "",
+        repo: pr.repo || "",
+        pr_number: pr.pr_number || "",
+        title: pr.title || "",
+        diff: pr.diff || sampleDiff
+      });
+      setIsPrModalOpen(false);
+      finishProgress("fetch", "Selected PR loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setError(err.message || "Failed to load selected PR.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onPostCommentToGithub() {
+    if (!form.repo || !form.pr_number) {
+      setError("Select a repository and PR number before posting a comment.");
+      return;
+    }
+    if (!finalComment) {
+      setError("No generated final comment available to post.");
+      return;
+    }
+    setLoadingAction("post-comment");
+    setError("");
+    startProgress("fetch");
+    try {
+      await postPrComment({
+        repo: form.repo,
+        pr_number: Number(form.pr_number),
+        body: finalComment
+      });
+      finishProgress("fetch", "Comment posted");
+    } catch (err) {
+      finishProgress("fetch", "Post failed");
+      setError(err.message || "Failed to post comment to GitHub.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
   const issues = Array.isArray(result?.issues) ? result.issues : [];
   const reviewInput = result?.review_input || {};
   const testOutput = result?.test_output || {};
@@ -187,6 +257,20 @@ export default function App() {
     });
   const testErrors = Array.isArray(testOutput?.errors) ? testOutput.errors : [];
   const testSuggestions = testOutput?.status === "fail" ? buildTestFixSuggestions(testOutput) : [];
+  const analysisSummaryItems = issues
+    .filter((issue) => issue?.message && !isNoiseIssue(issue))
+    .map((issue) => {
+      const location = issue?.file ? `${issue.file}${issue?.line ? `:${issue.line}` : ""}` : "Location unavailable";
+      const severity = issue?.severity ? String(issue.severity).toUpperCase() : "INFO";
+      return {
+        issueText: `[${severity}] ${issue.message}`,
+        location,
+        resolution:
+          typeof fixOutput?.changes_explained === "string" && fixOutput.changes_explained.trim()
+            ? fixOutput.changes_explained
+            : "Review the impacted logic at the listed location, update behavior to match expected intent, then re-run checks."
+      };
+    });
 
   return (
     <div className="app-shell">
@@ -233,6 +317,9 @@ export default function App() {
                 disabled={Boolean(loadingAction) || bootstrapping}
               >
                 {loadingAction === "review" ? "Analyzing..." : "Review Logic Flow"}
+              </button>
+              <button className="btn" onClick={onShowOpenPrs} disabled={Boolean(loadingAction) || bootstrapping}>
+                {loadingAction === "open-prs" ? "Loading PRs..." : "Show Open PRs"}
               </button>
               <button className="btn" onClick={onFetchResult} disabled={Boolean(loadingAction) || bootstrapping}>
                 {loadingAction === "fetch" ? "Syncing..." : "Retrieve State"}
@@ -318,6 +405,44 @@ export default function App() {
                     </div>
                   )) : <p style={{color: "var(--color-fg-muted)", textAlign: "center", fontSize: "0.875rem"}}>No critical regression or style anomalies detected.</p>}
                 </div>
+                <h3 style={{ fontSize: "0.875rem", marginTop: "1.25rem", marginBottom: "0.75rem" }}>Analysis Summary</h3>
+                <div className="issues-container">
+                  {analysisSummaryItems.length ? (
+                    analysisSummaryItems.map((item, idx) => (
+                      <div key={`${item.location}-${idx}`} className="issue-item" style={{ display: "block" }}>
+                        <p style={{ fontSize: "0.82rem", marginBottom: "0.4rem" }}>
+                          <strong>Issue:</strong> {item.issueText}
+                        </p>
+                        <p style={{ fontSize: "0.82rem", marginBottom: "0.4rem", color: "var(--color-fg-muted)" }}>
+                          <strong>Where:</strong> {item.location}
+                        </p>
+                        <p style={{ fontSize: "0.82rem" }}>
+                          <strong>How to solve:</strong> {item.resolution}
+                        </p>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="issue-item" style={{ display: "block" }}>
+                      <p style={{ fontSize: "0.82rem", marginBottom: "0.4rem" }}>
+                        <strong>Issue:</strong> No actionable issue was detected.
+                      </p>
+                      <p style={{ fontSize: "0.82rem", marginBottom: "0.4rem", color: "var(--color-fg-muted)" }}>
+                        <strong>Where:</strong> Not applicable.
+                      </p>
+                      <p style={{ fontSize: "0.82rem" }}>
+                        <strong>How to solve:</strong> Continue monitoring new PR scans for regressions or style violations.
+                      </p>
+                    </div>
+                  )}
+                </div>
+                <button
+                  className="btn"
+                  onClick={onPostCommentToGithub}
+                  disabled={Boolean(loadingAction) || bootstrapping || !finalComment}
+                  style={{ marginTop: "0.75rem" }}
+                >
+                  {loadingAction === "post-comment" ? "Posting Comment..." : "Post Comment to GitHub PR"}
+                </button>
               </div>
             </section>
 
@@ -396,6 +521,34 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {isPrModalOpen && (
+        <div className="modal-backdrop" onClick={() => setIsPrModalOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Open Pull Requests</h3>
+              <button className="btn modal-close" onClick={() => setIsPrModalOpen(false)}>Close</button>
+            </div>
+            <div className="modal-body">
+              {openPrs.length === 0 ? (
+                <p style={{ color: "var(--color-fg-muted)" }}>No open pull requests found.</p>
+              ) : (
+                openPrs.map((pr) => (
+                  <button
+                    key={pr.id || pr.number}
+                    className="pr-row"
+                    onClick={() => onSelectOpenPr(pr.number)}
+                    disabled={Boolean(loadingAction)}
+                  >
+                    <span className="pr-title">#{pr.number} {pr.title || "Untitled PR"}</span>
+                    <span className="pr-meta">{pr.repo}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

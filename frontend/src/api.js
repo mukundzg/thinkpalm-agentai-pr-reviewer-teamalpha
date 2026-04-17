@@ -46,3 +46,31 @@ export async function fetchDefaultPr() {
   }
   return res.json();
 }
+
+export async function fetchOpenPrs() {
+  const res = await fetch(`${API_BASE}/github/open-prs`);
+  if (!res.ok) {
+    throw new Error(await parseError(res, "Open PR list fetch failed"));
+  }
+  return res.json();
+}
+
+export async function fetchPrDetails(prNumber) {
+  const res = await fetch(`${API_BASE}/github/pr/${encodeURIComponent(prNumber)}`);
+  if (!res.ok) {
+    throw new Error(await parseError(res, "PR details fetch failed"));
+  }
+  return res.json();
+}
+
+export async function postPrComment(payload) {
+  const res = await fetch(`${API_BASE}/github/post-comment`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) {
+    throw new Error(await parseError(res, "PR comment post failed"));
+  }
+  return res.json();
+}
