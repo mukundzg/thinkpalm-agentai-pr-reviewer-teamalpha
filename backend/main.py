@@ -550,7 +550,15 @@ async def get_default_pr(project_id: int):
     token = resolve_token_for_project_id(project_id)
     prs = fetch_open_prs(repo_name, limit=1, token=token)
     if not prs:
-        raise HTTPException(status_code=404, detail=f"No open PRs found for {repo_name}.")
+        return {
+            "pr_id": "",
+            "repo": repo_name,
+            "pr_number": None,
+            "title": "",
+            "diff": "",
+            "project_id": project_id,
+            "no_open_prs": True,
+        }
 
     selected = prs[0]
     parsed = fetch_pr_file_patches(repo_name, selected["number"], token=token)
@@ -561,6 +569,7 @@ async def get_default_pr(project_id: int):
         "title": parsed.get("title", selected["title"]),
         "diff": parsed.get("combined_diff", ""),
         "project_id": project_id,
+        "no_open_prs": False,
     }
 
 
