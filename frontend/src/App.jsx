@@ -280,32 +280,71 @@ export default function App() {
   }, [settingsOpen]);
 
   function startProgress(action) {
-    const stageMap = {
-      review: [
-        { at: 15, label: "Initializing orchestration..." },
-        { at: 45, label: "AI analysis in progress..." },
-        { at: 75, label: "Generating fix recommendations..." },
-        { at: 95, label: "Compiling final report..." }
-      ],
-      fetch: [
-        { at: 40, label: "Retrieving records..." },
-        { at: 90, label: "Processing response data..." }
-      ]
+    const profileMap = {
+      review: {
+        estimatedMs: 55000,
+        stallWindows: [
+          [0.2, 0.24],
+          [0.58, 0.64]
+        ],
+        stages: [
+          { atMs: 0, label: "Initializing orchestration..." },
+          { atMs: 9000, label: "Analyzing changed files..." },
+          { atMs: 24000, label: "Generating fix recommendations..." },
+          { atMs: 38000, label: "Evaluating patch and tests..." },
+          { atMs: 50000, label: "Compiling final report..." }
+        ]
+      },
+      fetch: {
+        estimatedMs: 10000,
+        stallWindows: [[0.55, 0.68]],
+        stages: [
+          { atMs: 0, label: "Retrieving records..." },
+          { atMs: 5000, label: "Processing response data..." },
+          { atMs: 8200, label: "Finalizing results..." }
+        ]
+      }
     };
-    const stages = stageMap[action];
-    let idx = 0;
-    let current = 0;
+    const profile = profileMap[action];
     const setProgress = action === "review" ? setReviewProgress : setFetchProgress;
-    setProgress({ value: 5, label: stages[0].label });
+    const startAt = Date.now();
+    let current = 1;
+    setProgress({ value: current, label: `${profile.stages[0].label} • ~${Math.ceil(profile.estimatedMs / 1000)}s left` });
+
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
 
     timerRef.current = setInterval(() => {
-      const nextTarget = stages[Math.min(idx, stages.length - 1)].at;
-      current = Math.min(current + Math.max(1, Math.round((nextTarget - current) / 12)), 98);
-      while (idx < stages.length - 1 && current >= stages[idx + 1].at) {
-        idx += 1;
+      const elapsed = Date.now() - startAt;
+      const normalized = Math.min(elapsed / profile.estimatedMs, 1);
+      const easedTarget = 96 * (1 - Math.pow(1 - normalized, 2.25));
+      const inStallWindow = profile.stallWindows.some(([s, e]) => normalized >= s && normalized <= e);
+      const jitter = (Math.sin(elapsed / 1700) + Math.sin(elapsed / 900)) * 0.35;
+      let target = Math.min(96, Math.max(1, easedTarget + jitter));
+
+      if (inStallWindow) {
+        target = Math.min(target, current + 0.25);
       }
-      setProgress({ value: current, label: stages[idx].label });
-    }, 280);
+
+      const delta = target - current;
+      const step = delta > 0 ? Math.min(2.2, Math.max(0.12, delta * 0.24)) : 0;
+      current = Math.min(96, current + step);
+
+      let stageLabel = profile.stages[0].label;
+      for (const stage of profile.stages) {
+        if (elapsed >= stage.atMs) {
+          stageLabel = stage.label;
+        } else {
+          break;
+        }
+      }
+
+      const remainingSec = Math.max(1, Math.ceil((profile.estimatedMs - elapsed) / 1000));
+      const etaText = current >= 95 ? "almost done" : `~${remainingSec}s left`;
+      setProgress({ value: Math.round(current), label: `${stageLabel} • ${etaText}` });
+    }, 240);
   }
 
   function finishProgress(action, label) {
