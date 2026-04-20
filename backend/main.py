@@ -34,9 +34,12 @@ from backend.sqlite_store import (
     insert_github_project,
     init_db,
     list_projects_public,
+    list_webhook_pr_events,
+    log_webhook_pr_event,
     log_pr_action,
     save_review_result,
     update_github_project,
+    update_webhook_pr_event_status,
 )
 from backend.tools.github import approve_pull_request, fetch_open_prs, fetch_pr_file_patches, post_pr_comment
 
@@ -355,6 +358,18 @@ async def github_webhook(
     )
     proj_row = get_githubproject_row_by_full_name(review_input.repo)
     project_id = int(proj_row["id"]) if proj_row else None
+    event_id = log_webhook_pr_event(
+        delivery_id=x_github_delivery,
+        project_id=project_id,
+        repo=review_input.repo,
+        pr_number=review_input.pr_number,
+        pr_id=review_input.pr_id,
+        title=review_input.title,
+        action=str(action),
+        sender_login=str((event.get("sender") or {}).get("login") or ""),
+        event_json=event,
+        processed_status="received",
+    )
     token = _token_for_repo_full_name(review_input.repo)
     try:
         parsed = fetch_pr_file_patches(review_input.repo, review_input.pr_number, token=token)
@@ -363,7 +378,12 @@ async def github_webhook(
         review_input.title = parsed.get("title", review_input.title)
     except Exception:
         review_input.diff = pull_request.get("body", "") or ""
-    output = _run_review(review_input, project_id=project_id)
+    try:
+        output = _run_review(review_input, project_id=project_id)
+        update_webhook_pr_event_status(event_id, "processed")
+    except Exception:
+        update_webhook_pr_event_status(event_id, "failed")
+        raise
     try:
         post_pr_comment(review_input.repo, review_input.pr_number, output.get("final_comment", ""), token=token)
         log_pr_action(
@@ -388,6 +408,11 @@ async def github_webhook(
             project_id=project_id,
         )
     return {"status": "ok", "pr_id": review_input.pr_id}
+
+
+@app.get("/webhook/inbox")
+async def webhook_inbox(limit: int = 100, project_id: int | None = None):
+    return {"items": list_webhook_pr_events(limit=limit, project_id=project_id)}
 
 
 @app.post("/review")

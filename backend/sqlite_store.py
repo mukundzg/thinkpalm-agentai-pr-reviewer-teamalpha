@@ -33,6 +33,14 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE review_results ADD COLUMN project_id INTEGER")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_review_results_project_id ON review_results(project_id)")
 
+    cols = _table_columns(conn, "webhook_pr_events")
+    if "processed_status" not in cols:
+        conn.execute("ALTER TABLE webhook_pr_events ADD COLUMN processed_status TEXT DEFAULT 'received'")
+    if "processed_at" not in cols:
+        conn.execute("ALTER TABLE webhook_pr_events ADD COLUMN processed_at DATETIME")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_project_id ON webhook_pr_events(project_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_received_at ON webhook_pr_events(received_at)")
+
 
 def _bootstrap_project_from_env() -> None:
     from backend.secrets_crypto import encrypt_secret, is_encryption_configured
@@ -203,6 +211,28 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_github_projects_full_name ON github_projects(full_name)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_pr_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                delivery_id TEXT,
+                project_id INTEGER,
+                repo TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                pr_id TEXT NOT NULL,
+                title TEXT,
+                action TEXT NOT NULL,
+                sender_login TEXT,
+                event_json TEXT,
+                processed_status TEXT NOT NULL DEFAULT 'received',
+                processed_at DATETIME,
+                received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(project_id) REFERENCES github_projects(id)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_pr_id ON webhook_pr_events(pr_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_delivery_id ON webhook_pr_events(delivery_id)")
         _apply_schema_migrations(conn)
         conn.commit()
     _bootstrap_project_from_env()
@@ -782,3 +812,101 @@ def delete_github_project(project_id: int) -> None:
     with sqlite3.connect(_db_path()) as conn:
         conn.execute("DELETE FROM github_projects WHERE id = ?", (project_id,))
         conn.commit()
+
+
+def log_webhook_pr_event(
+    *,
+    delivery_id: str | None,
+    project_id: int | None,
+    repo: str,
+    pr_number: int,
+    pr_id: str,
+    title: str,
+    action: str,
+    sender_login: str | None,
+    event_json: dict[str, Any] | None = None,
+    processed_status: str = "received",
+) -> int:
+    payload = json.dumps(jsonable_encoder(event_json or {})) if event_json else None
+    with sqlite3.connect(_db_path()) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO webhook_pr_events (
+                delivery_id, project_id, repo, pr_number, pr_id, title, action, sender_login, event_json, processed_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                project_id,
+                repo,
+                pr_number,
+                pr_id,
+                title,
+                action,
+                sender_login,
+                payload,
+                processed_status,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def update_webhook_pr_event_status(event_id: int, status: str) -> None:
+    with sqlite3.connect(_db_path()) as conn:
+        conn.execute(
+            """
+            UPDATE webhook_pr_events
+            SET processed_status = ?, processed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (status, event_id),
+        )
+        conn.commit()
+
+
+def list_webhook_pr_events(limit: int = 100, project_id: int | None = None) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 500))
+    with sqlite3.connect(_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        if project_id is None:
+            rows = conn.execute(
+                """
+                SELECT id, delivery_id, project_id, repo, pr_number, pr_id, title, action, sender_login,
+                       processed_status, processed_at, received_at
+                FROM webhook_pr_events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, delivery_id, project_id, repo, pr_number, pr_id, title, action, sender_login,
+                       processed_status, processed_at, received_at
+                FROM webhook_pr_events
+                WHERE project_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (project_id, safe_limit),
+            ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "delivery_id": row["delivery_id"],
+            "project_id": row["project_id"],
+            "repo": row["repo"],
+            "pr_number": row["pr_number"],
+            "pr_id": row["pr_id"],
+            "title": row["title"] or "",
+            "action": row["action"],
+            "sender_login": row["sender_login"] or "",
+            "processed_status": row["processed_status"],
+            "processed_at": row["processed_at"],
+            "received_at": row["received_at"],
+        }
+        for row in rows
+    ]
