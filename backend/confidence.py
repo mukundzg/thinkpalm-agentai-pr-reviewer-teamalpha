@@ -31,10 +31,79 @@ def _count_changed_files(diff: str, changed_files: list[dict[str, Any]]) -> int:
     return len(files)
 
 
+def _extract_changed_paths(diff: str, changed_files: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    if changed_files:
+        for item in changed_files:
+            if isinstance(item, dict):
+                name = str(item.get("filename", "")).strip()
+                if name:
+                    paths.append(name)
+        if paths:
+            return paths
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                raw = parts[3]
+                if raw.startswith("b/"):
+                    raw = raw[2:]
+                paths.append(raw)
+    return paths
+
+
+def _is_business_logic_file(path: str) -> bool:
+    p = path.lower()
+    if any(token in p for token in ("test", "spec", "fixture", "docs/", "readme", ".md")):
+        return False
+    code_like = p.endswith((".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java", ".rb", ".php"))
+    return code_like
+
+
+def _detect_semantic_risk(diff: str) -> dict[str, bool]:
+    operator_mutation = False
+    arithmetic_mutation = False
+    control_flow_mutation = False
+    conditional_flip = False
+
+    removed_ops: list[str] = []
+    added_ops: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith(("+++", "---", "@@")):
+            continue
+        if line.startswith("-"):
+            removed_ops.extend(re.findall(r"(==|!=|<=|>=|\+|-|\*|/|//|%)", line))
+            if re.search(r"\b(if|elif|while|for)\b", line):
+                control_flow_mutation = True
+            if re.search(r"\b(and|or|not)\b", line):
+                conditional_flip = True
+        elif line.startswith("+"):
+            added_ops.extend(re.findall(r"(==|!=|<=|>=|\+|-|\*|/|//|%)", line))
+            if re.search(r"\b(if|elif|while|for)\b", line):
+                control_flow_mutation = True
+            if re.search(r"\b(and|or|not)\b", line):
+                conditional_flip = True
+
+    if removed_ops and added_ops and removed_ops != added_ops:
+        operator_mutation = True
+    if any(op in removed_ops + added_ops for op in ("+", "-", "*", "/", "//", "%")):
+        arithmetic_mutation = bool(removed_ops or added_ops)
+
+    return {
+        "operator_mutation": operator_mutation,
+        "arithmetic_mutation": arithmetic_mutation,
+        "control_flow_mutation": control_flow_mutation,
+        "conditional_flip": conditional_flip,
+    }
+
+
 def _build_signals(state: WorkflowState) -> dict[str, Any]:
     issues = state.issues or []
     diff = state.review_input.diff or ""
     added, removed = _count_diff_churn(diff)
+    paths = _extract_changed_paths(diff, state.review_input.changed_files)
+    semantic = _detect_semantic_risk(diff)
+    business_logic_change = any(_is_business_logic_file(path) for path in paths)
     return {
         "test_pass": bool(state.test_output and state.test_output.status == "pass"),
         "issue_count": len(issues),
@@ -45,6 +114,11 @@ def _build_signals(state: WorkflowState) -> dict[str, Any]:
         "diff_lines_removed": removed,
         "changed_files": _count_changed_files(diff, state.review_input.changed_files),
         "llm_ok": bool(state.metadata.get("review_model_raw")),
+        "business_logic_change": business_logic_change,
+        "operator_mutation": semantic["operator_mutation"],
+        "arithmetic_mutation": semantic["arithmetic_mutation"],
+        "control_flow_mutation": semantic["control_flow_mutation"],
+        "conditional_flip": semantic["conditional_flip"],
     }
 
 
@@ -76,8 +150,16 @@ def compute_confidence_from_signals(signals: dict[str, Any]) -> float:
 def annotate_workflow_confidence(state: WorkflowState) -> float:
     signals = _build_signals(state)
     score = compute_confidence_from_signals(signals)
+    semantic_risk = bool(
+        signals["operator_mutation"] or signals["arithmetic_mutation"] or signals["control_flow_mutation"] or signals["conditional_flip"]
+    )
+    # Keep this adaptive threshold explicit for router logic.
+    threshold = 0.4 if (signals["arithmetic_mutation"] or signals["control_flow_mutation"]) else 0.5
     state.metadata["confidence_signals"] = signals
     state.metadata["confidence_score"] = score
     state.metadata["confidence_pct"] = round(score * 100.0, 1)
+    state.metadata["semantic_risk"] = semantic_risk
+    state.metadata["business_logic_change"] = bool(signals["business_logic_change"])
+    state.metadata["confidence_threshold"] = threshold
     return score
 

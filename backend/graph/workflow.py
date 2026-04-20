@@ -13,8 +13,10 @@ def _route_after_tester(state: WorkflowState) -> str:
     mode = str(state.metadata.get("review_mode", "fast"))
     if mode == "fast":
         score = float(state.metadata.get("confidence_score", 0.0) or 0.0)
-        if score < 0.5:
-            state.metadata["review_mode"] = "llm_escalated"
+        threshold = float(state.metadata.get("confidence_threshold", 0.5) or 0.5)
+        business_logic_change = bool(state.metadata.get("business_logic_change", False))
+        semantic_risk = bool(state.metadata.get("semantic_risk", False))
+        if business_logic_change or semantic_risk or score < threshold:
             return "escalate"
         return "summarize"
     if state.test_output and state.test_output.status == "fail" and state.attempts < state.max_attempts:
