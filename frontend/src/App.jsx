@@ -864,17 +864,33 @@ export default function App() {
       <div className="hero-surface">
         <div className="hero-surface-inner">
           <header className="hero">
+            <div className="hero-row">
+              <div className="hero-title-block">
+                <h1>AgentAI PR Reviewer</h1>
+                <p>Intelligent multi-agent orchestration for autonomous pull request analysis and correction.</p>
+              </div>
+              <div className="hero-actions">
+                <button
+                  className="btn hero-btn"
+                  onClick={onShowPrHistory}
+                  disabled={Boolean(loadingAction) || bootstrapping || !projectId}
+                >
+                  {loadingAction === "pr-history" ? "Loading History..." : "PR History"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-settings hero-btn"
+                  aria-label="Settings"
+                  title="GitHub projects and credentials"
+                  onClick={() => setSettingsOpen(true)}
+                  disabled={bootstrapping}
+                >
+                  <span aria-hidden="true" className="btn-settings-icon">⚙</span>
+                  <span>Settings</span>
+                </button>
+              </div>
+            </div>
             <div className="hero-toolbar">
-              <button
-                type="button"
-                className="btn btn-settings"
-                aria-label="Settings"
-                title="GitHub projects and credentials"
-                onClick={() => setSettingsOpen(true)}
-                disabled={bootstrapping}
-              >
-                Settings
-              </button>
               <label className="project-picker">
                 <span>Project</span>
                 <select
@@ -891,21 +907,12 @@ export default function App() {
                 </select>
               </label>
             </div>
-            <div className="hero-row">
-              <div>
-                <h1>AgentAI PR Reviewer</h1>
-                <p>Intelligent multi-agent orchestration for autonomous pull request analysis and correction.</p>
+            {loadingAction === "switch-project" && (
+              <div className="project-switch-loader" role="status" aria-live="polite">
+                <span className="project-switch-loader__spinner" />
+                <span>Loading selected project details...</span>
               </div>
-              <div className="hero-actions">
-                <button
-                  className="btn hero-btn"
-                  onClick={onShowPrHistory}
-                  disabled={Boolean(loadingAction) || bootstrapping || !projectId}
-                >
-                  {loadingAction === "pr-history" ? "Loading History..." : "PR History"}
-                </button>
-              </div>
-            </div>
+            )}
           </header>
         </div>
         {error ? (
