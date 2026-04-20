@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from backend.llm import llm_json
 from backend.models import Issue, WorkflowState
@@ -26,12 +27,44 @@ def _is_parser_noise(item: dict) -> bool:
     )
 
 
-def review_agent(state: WorkflowState) -> WorkflowState:
+def _detect_division_logic_issue(diff: str) -> Issue | None:
+    """
+    Detect obvious division implementation mistakes from added lines in a diff.
+    Current deterministic rule:
+    - In a `def div(...)` block, a return expression using `*` but not `/`.
+    """
+    added_lines = [line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")]
+    in_div = False
+    function_line: int | None = None
+    for idx, raw in enumerate(added_lines, start=1):
+        stripped = raw.strip()
+        if re.match(r"^def\s+div\s*\(", stripped):
+            in_div = True
+            function_line = idx
+            continue
+        if in_div and re.match(r"^def\s+\w+\s*\(", stripped):
+            in_div = False
+        if in_div and stripped.startswith("return "):
+            expr = stripped.removeprefix("return ").replace(" ", "")
+            if "*" in expr and "/" not in expr:
+                return Issue(
+                    type="bug",
+                    file="diff_input",
+                    line=function_line or idx,
+                    message="Division function appears to multiply instead of divide.",
+                    severity="high",
+                )
+    return None
+
+
+def _collect_issues(state: WorkflowState, *, use_llm: bool) -> tuple[list[Issue], list[dict], dict]:
     diff = state.review_input.diff
     lint_issues = run_linter(diff, language="python")
     issues: list[Issue] = []
+    model_response: dict = {}
 
-    prompt = f"""
+    if use_llm:
+        prompt = f"""
 Review this git diff and return JSON with key "issues".
 Each issue item must include:
 - type: bug|style|security|performance|test|other
@@ -46,15 +79,15 @@ Diff:
 Changed files:
 {state.review_input.changed_files[:30]}
 """
-    model_response = llm_json(prompt)
-    llm_issues = model_response.get("issues", []) if isinstance(model_response, dict) else []
-    for item in llm_issues:
-        if isinstance(item, dict) and _is_parser_noise(item):
-            continue
-        try:
-            issues.append(Issue(**item))
-        except Exception:
-            continue
+        model_response = llm_json(prompt)
+        llm_issues = model_response.get("issues", []) if isinstance(model_response, dict) else []
+        for item in llm_issues:
+            if isinstance(item, dict) and _is_parser_noise(item):
+                continue
+            try:
+                issues.append(Issue(**item))
+            except Exception:
+                continue
 
     for item in lint_issues:
         if _is_parser_noise(item):
@@ -69,6 +102,10 @@ Changed files:
             )
         )
 
+    logic_issue = _detect_division_logic_issue(diff)
+    if logic_issue:
+        issues.append(logic_issue)
+
     if not issues and "TODO" in diff:
         issues.append(
             Issue(
@@ -79,9 +116,14 @@ Changed files:
                 severity="low",
             )
         )
+    return issues, lint_issues, model_response
 
-    # Keep deterministic metadata for downstream debugging.
+
+def _run_review_agent(state: WorkflowState, *, use_llm: bool, agent_name: str, next_action: str) -> WorkflowState:
+    issues, lint_issues, model_response = _collect_issues(state, use_llm=use_llm)
+    # Keep deterministic metadata for downstream debugging and confidence scoring.
     state.metadata["review_model_raw"] = json.dumps(model_response)[:2000] if model_response else ""
+    state.metadata["lint_issue_count"] = len(lint_issues)
     state.issues = issues
     run_id = int(state.metadata.get("decision_run_id", 0) or 0)
     step_order = int(state.metadata.get("decision_step_order", 0) or 0) + 1
@@ -91,19 +133,23 @@ Changed files:
         log_agent_decision(
             run_id=run_id,
             step_order=step_order,
-            agent_name="reviewer",
+            agent_name=agent_name,
             decision_type="issue_assessment",
             severity="high" if high_severity_count else ("medium" if issues else "low"),
-            confidence=0.8 if issues else 0.65,
+            confidence=0.8 if use_llm else 0.72,
             decision_goal="Identify actionable issues in PR diff.",
-            selected_option="Report detected issues and pass context to fixer.",
-            selection_reason=f"Detected {len(issues)} issue(s) using model + lint signals.",
+            selected_option=next_action,
+            selection_reason=(
+                f"Detected {len(issues)} issue(s) using model + lint signals."
+                if use_llm
+                else f"Detected {len(issues)} issue(s) using deterministic + lint signals."
+            ),
             expected_outcome="Downstream fixer receives actionable issue list.",
             actual_outcome=f"{len(issues)} issue(s) stored in workflow state.",
-            next_action="Invoke fixer with current issue set.",
+            next_action=next_action,
             options=[
-                {"option_key": "A", "option_text": "Report issues and continue", "was_selected": True},
-                {"option_key": "B", "option_text": "Stop due to no issues", "was_selected": False},
+                {"option_key": "A", "option_text": next_action, "was_selected": True},
+                {"option_key": "B", "option_text": "Defer action", "was_selected": False},
             ],
             signals=[
                 {"signal_type": "issue_count", "signal_value": len(issues)},
@@ -116,7 +162,29 @@ Changed files:
                     "result": "PASS",
                     "notes": f"High/critical count={high_severity_count}",
                 },
-                {"policy_name": "evidence_gated_action", "result": "PASS", "notes": "Model and linter signals used."},
+                {
+                    "policy_name": "evidence_gated_action",
+                    "result": "PASS",
+                    "notes": "Model and linter signals used." if use_llm else "Deterministic and linter signals used.",
+                },
             ],
         )
     return state
+
+
+def review_fast_agent(state: WorkflowState) -> WorkflowState:
+    return _run_review_agent(
+        state,
+        use_llm=False,
+        agent_name="reviewer_fast",
+        next_action="Run tests before LLM escalation.",
+    )
+
+
+def review_agent(state: WorkflowState) -> WorkflowState:
+    return _run_review_agent(
+        state,
+        use_llm=True,
+        agent_name="reviewer",
+        next_action="Report detected issues and pass context to fixer.",
+    )
