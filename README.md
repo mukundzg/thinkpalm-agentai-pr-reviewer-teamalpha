@@ -8,14 +8,18 @@ This project implements a GitHub pull request review pipeline:
 
 GitHub PR → webhook or manual UI → FastAPI backend → LangGraph multi-agent workflow → tools + memory → PR comments, approvals, and a React dashboard.
 
+
+
 ## Implemented stack
 
-- **Orchestration:** LangGraph
-- **Backend:** FastAPI
-- **Tools:** GitHub API (multi-repo), linter wrapper, sandbox test runner, diff generation
-- **Memory:** ChromaDB vector store for issue/fix history
-- **UI:** React + Vite dashboard (project picker, onboarding, settings)
-- **LLM:** OpenAI or any OpenAI-compatible HTTP API (e.g. local gateway)
+- **Runtime:** Python `3.11` (`backend/Dockerfile`), Node.js `20` (`frontend/Dockerfile`)
+- **Orchestration:** LangGraph (dependency declared in `backend/requirements.txt`, currently unpinned)
+- **Backend:** FastAPI + Uvicorn (dependencies declared in `backend/requirements.txt`, currently unpinned)
+- **Tools:** GitHub API via PyGithub (declared, unpinned), linter wrapper, sandbox test runner, diff generation
+- **Memory:** ChromaDB vector store (declared in backend requirements, currently unpinned)
+- **UI:** React `^18.3.1` + Vite `^5.4.10` dashboard (project picker, onboarding, settings)
+- **Testing/UI Tooling:** Jest `^30.3.0`, `@vitejs/plugin-react` `^4.3.1`
+- **LLM:** OpenAI SDK (declared in backend requirements, currently unpinned); model/provider configured via `OPENAI_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL`
 
 ## Features
 
@@ -132,6 +136,112 @@ START → Reviewer Fast (deterministic + lint) → Test Agent
 - Escalate to LLM path when `business_logic_change` or `semantic_risk` is true, or when `confidence_score < confidence_threshold`.
 - On escalated path, `Fix Generator` is retried only when tests fail and retry budget remains.
 - End with `Summary`, which persists a final human-readable review comment.
+
+##########################################
+## Team members and their Contributions ##
+##########################################
+
+### 1) Initial Proof of Concept (POC)
+
+- Built a minimal system to fetch and display the latest PR from a given GitHub repository.
+- Introduced a multi-agent analysis pipeline to evaluate PR content.
+- Output was presented as raw JSON analysis.
+
+**Ownership** Mukund C Gokulan
+- **Backend:** GitHub API integration and agent orchestration.
+- **Fullstack:** Basic API consumption and result rendering.
+- **Frontend:** Minimal UI scaffold for displaying raw results.
+
+### 2) Structured Analysis & UI Transformation
+
+- Converted raw JSON into a structured, UI-friendly PR analysis report.
+- Added parsing logic to highlight:
+  - Code issues
+  - Suggestions
+  - Risk indicators
+
+**Ownership** Aadhithya Mohandas
+- **Backend:** Structured response schema design.
+- **Fullstack:** JSON parsing and transformation logic.
+- **Frontend:** UI components for readable analysis visualization.
+
+### 3) Persistence Layer (SQLite Integration)
+
+- Integrated SQLite database to store PR analysis reports.
+- Enabled:
+  - Historical tracking of PR reviews
+  - Faster retrieval without recomputation
+
+**Ownership** Sruthy Muraleedharan
+- **Backend:** Database schema design and storage/retrieval APIs.
+- **Fullstack:** Data flow integration between API and UI.
+- **Frontend:** Display of stored analysis results.
+
+### 4) GitHub Actions Integration
+
+- Added direct PR interactions from the app:
+  - Approve PR
+  - Add comments
+
+**Ownership** Aadhithya Mohandas
+- **Backend:** GitHub API action handlers (approve/comment).
+- **Fullstack:** Action trigger wiring from UI to APIs.
+- **Frontend:** Action buttons and interaction flows.
+
+### 5) Multi-PR Support
+
+- Extended system to fetch all PRs in a repository.
+- Enabled users to select and analyze specific PRs.
+
+**Ownership** Sruthy Muraleedharan
+- **Backend:** PR listing APIs and filtering support.
+- **Fullstack:** Selection logic and API integration.
+- **Frontend:** PR listing UI and selection controls.
+
+### 6) Multi-Repository Support
+
+- Introduced support for multiple repositories.
+- Enabled users to:
+  - Switch between repositories
+  - Analyze PRs across projects
+
+**Ownership** Mukund C Gokulan
+- **Backend:** Multi-repo handling and dynamic configuration.
+- **Fullstack:** State management for repository switching.
+- **Frontend:** Repository selection UI.
+
+### 7) UI Enhancements (GitHub-like Experience)
+
+- Transformed the initial scaffold into a GitHub-inspired interface.
+- Improved:
+  - Layout
+  - Readability
+  - Developer experience
+
+**Ownership** Sruthy Muraleedharan
+- **Frontend:** Major UI/UX redesign.
+- **Fullstack:** Data binding improvements.
+- **Backend:** Minor response adjustments for UI compatibility.
+
+### 8) Webhook Integration (Event-Driven Automation)
+
+- Integrated GitHub webhooks to automate PR ingestion.
+- On PR creation:
+  - Event is sent to backend
+  - PR becomes automatically available for analysis
+
+**Ownership** Mukund C Gokulan
+- **Backend:** Webhook endpoint, signature validation, and event processing.
+- **Fullstack:** Integration with existing review pipeline.
+- **Frontend:** Display of newly received PR activity.
+
+### 9) Future Scope (Planned, Not Yet Implemented)
+
+- Push notifications for new PR events (deferred due to cost considerations).
+- Enhanced agent intelligence (risk scoring, deeper semantic analysis).
+- CI/CD pipeline integration for automated workflows.
+
+Mukund C Gokulan, Aadhithya Mohandas and Sruthy Muraleedharan
 
 ## Setup
 
