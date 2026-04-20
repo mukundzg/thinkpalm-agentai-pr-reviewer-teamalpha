@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from backend.main import app
@@ -32,13 +33,18 @@ def test_webhook_rejects_invalid_signature(monkeypatch):
 
 def test_webhook_accepts_valid_signature_and_dedupes(monkeypatch):
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token-for-tests")
 
     import backend.main as main_module
 
-    def fake_fetch(repo, pr):
-        return {"files": [{"filename": "a.py", "patch": "@@ -1 +1 @@\n-print(1)\n+print(2)"}], "combined_diff": "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-print(1)\n+print(2)", "title": "demo"}
+    def fake_fetch(repo, pr, token=None):
+        return {
+            "files": [{"filename": "a.py", "patch": "@@ -1 +1 @@\n-print(1)\n+print(2)"}],
+            "combined_diff": "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-print(1)\n+print(2)",
+            "title": "demo",
+        }
 
-    def fake_run(review_input):
+    def fake_run(review_input, project_id=None):
         return {"final_comment": "ok", "review_input": review_input.model_dump()}
 
     monkeypatch.setattr(main_module, "fetch_pr_file_patches", fake_fetch)
@@ -69,12 +75,13 @@ def test_webhook_accepts_valid_signature_and_dedupes(monkeypatch):
 
 def test_webhook_accepts_form_encoded_payload(monkeypatch):
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token-for-tests")
     import backend.main as main_module
 
-    def fake_fetch(repo, pr):
+    def fake_fetch(repo, pr, token=None):
         return {"files": [], "combined_diff": "", "title": "demo"}
 
-    def fake_run(review_input):
+    def fake_run(review_input, project_id=None):
         return {"final_comment": "ok", "review_input": review_input.model_dump()}
 
     monkeypatch.setattr(main_module, "fetch_pr_file_patches", fake_fetch)

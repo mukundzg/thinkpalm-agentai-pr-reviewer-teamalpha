@@ -1,6 +1,25 @@
-import { useEffect, useRef, useState } from "react";
-import { fetchDefaultPr, fetchResult, triggerManualReview } from "./api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  approvePr,
+  createProject,
+  deleteProject,
+  fetchCryptoStatus,
+  fetchDecisionHistoryByRun,
+  fetchOnboardingStatus,
+  generateAppSecret,
+  fetchDefaultPr,
+  fetchOpenPrs,
+  fetchPrActions,
+  fetchPrDetails,
+  fetchPrHistory,
+  fetchProjects,
+  fetchResult,
+  postPrComment,
+  triggerManualReview
+} from "./api";
 import "./App.css";
+
+const LS_PROJECT_ID = "prReviewerProjectId";
 
 const sampleDiff = `diff --git a/example.py b/example.py
 --- a/example.py
@@ -11,6 +30,22 @@ const sampleDiff = `diff --git a/example.py b/example.py
  def run():
      return True
  `;
+
+function buildFormFromDefaultPr(pr) {
+  const noOpenPrs = Boolean(pr?.no_open_prs);
+  const prNumberRaw = pr?.pr_number;
+  const diffStr = pr?.diff != null ? String(pr.diff) : "";
+  return {
+    form: {
+      pr_id: pr?.pr_id != null ? String(pr.pr_id) : "",
+      repo: pr?.repo != null ? String(pr.repo) : "",
+      pr_number: prNumberRaw != null && prNumberRaw !== "" ? String(prNumberRaw) : "",
+      title: pr?.title != null ? String(pr.title) : "",
+      diff: noOpenPrs ? "" : diffStr.trim() ? diffStr : sampleDiff
+    },
+    noOpenPrs
+  };
+}
 
 function isNoiseIssue(issue) {
   const message = String(issue?.message || "").toLowerCase();
@@ -63,31 +98,186 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [loadingAction, setLoadingAction] = useState("");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [bootstrapping, setBootstrapping] = useState(true);
   const [showRawJson, setShowRawJson] = useState(false);
   const [reviewProgress, setReviewProgress] = useState({ value: 0, label: "" });
   const [fetchProgress, setFetchProgress] = useState({ value: 0, label: "" });
+  const [isPrModalOpen, setIsPrModalOpen] = useState(false);
+  const [openPrs, setOpenPrs] = useState([]);
+  const [isDecisionModalOpen, setIsDecisionModalOpen] = useState(false);
+  const [decisionHistory, setDecisionHistory] = useState(null);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const [prHistoryItems, setPrHistoryItems] = useState([]);
+  const [prActions, setPrActions] = useState([]);
+  const [decisionFlowActions, setDecisionFlowActions] = useState([]);
+  const [decisionFlowActionsLoading, setDecisionFlowActionsLoading] = useState(false);
+  const [projects, setProjects] = useState([]);
+  const [projectId, setProjectId] = useState(null);
+  const [cryptoStatus, setCryptoStatus] = useState(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [newProject, setNewProject] = useState({ full_name: "", github_token: "", webhook_secret: "" });
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [onboardingStatus, setOnboardingStatus] = useState(null);
+  const [onboardingBusy, setOnboardingBusy] = useState(false);
   const timerRef = useRef(null);
 
+  const loadInitialPrForProjects = useCallback(async (items) => {
+    if (!Array.isArray(items) || !items.length) {
+      return;
+    }
+    const saved = localStorage.getItem(LS_PROJECT_ID);
+    let chosen = saved ? Number(saved) : NaN;
+    if (!items.some((p) => p.id === chosen)) {
+      chosen = items[0].id;
+    }
+    setProjectId(chosen);
+    localStorage.setItem(LS_PROJECT_ID, String(chosen));
+    const projectMeta = items.find((p) => p.id === chosen);
+    const repoName = projectMeta?.full_name || "";
+    try {
+      const pr = await fetchDefaultPr(chosen);
+      const { form: nextForm, noOpenPrs } = buildFormFromDefaultPr(pr);
+      setForm(nextForm);
+      if (noOpenPrs) {
+        setInfo(`No open pull requests for ${repoName}. Enter a PR number or use Show Open PRs when one exists.`);
+        setError("");
+      } else {
+        setInfo("");
+        setError("");
+      }
+    } catch (e) {
+      setForm({
+        pr_id: "",
+        repo: repoName,
+        pr_number: "",
+        title: "",
+        diff: ""
+      });
+      setInfo("");
+      setError(e.message || "Could not load the default pull request for this project.");
+    }
+  }, []);
+
+  async function reloadPrActions() {
+    if (!form.pr_id) {
+      setPrActions([]);
+      return;
+    }
+    try {
+      const data = await fetchPrActions(form.pr_id);
+      setPrActions(Array.isArray(data?.items) ? data.items : []);
+    } catch {
+      setPrActions([]);
+    }
+  }
+
   useEffect(() => {
-    async function loadDefaultPr() {
+    let cancelled = false;
+    async function bootstrap() {
+      setError("");
       try {
-        const pr = await fetchDefaultPr();
-        setForm({
-          pr_id: pr.pr_id,
-          repo: pr.repo,
-          pr_number: pr.pr_number,
-          title: pr.title,
-          diff: pr.diff || sampleDiff
-        });
+        const [ob, projRes] = await Promise.all([fetchOnboardingStatus(), fetchProjects()]);
+        if (cancelled) {
+          return;
+        }
+        setOnboardingStatus(ob);
+        const items = Array.isArray(projRes?.items) ? projRes.items : [];
+        setProjects(items);
+        let cs = null;
+        try {
+          cs = await fetchCryptoStatus();
+        } catch {
+          cs = null;
+        }
+        if (!cancelled) {
+          setCryptoStatus(cs);
+        }
+        if (!ob.onboarding_complete) {
+          return;
+        }
+        await loadInitialPrForProjects(items);
       } catch (err) {
-        setError("Failed to initialize session with backend services.");
+        if (!cancelled) {
+          setError(err.message || "Failed to initialize session with backend services.");
+          setOnboardingStatus({
+            encryption_configured: false,
+            project_count: 0,
+            needs_encryption: true,
+            needs_first_project: false,
+            onboarding_complete: false
+          });
+        }
       } finally {
-        setBootstrapping(false);
+        if (!cancelled) {
+          setBootstrapping(false);
+        }
       }
     }
-    loadDefaultPr();
-  }, []);
+    bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadInitialPrForProjects]);
+
+  useEffect(() => {
+    if (error) {
+      setInfo("");
+    }
+  }, [error]);
+
+  useEffect(() => {
+    if (!result || !form.pr_id) {
+      setPrActions([]);
+      return;
+    }
+    let cancelled = false;
+    fetchPrActions(form.pr_id)
+      .then((data) => {
+        if (!cancelled) setPrActions(Array.isArray(data?.items) ? data.items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setPrActions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [result, form.pr_id]);
+
+  useEffect(() => {
+    if (!isDecisionModalOpen || !decisionHistory?.run?.pr_id) {
+      setDecisionFlowActions([]);
+      setDecisionFlowActionsLoading(false);
+      return;
+    }
+    const prId = decisionHistory.run.pr_id;
+    let cancelled = false;
+    setDecisionFlowActionsLoading(true);
+    fetchPrActions(prId)
+      .then((data) => {
+        if (!cancelled) {
+          setDecisionFlowActions(Array.isArray(data?.items) ? data.items : []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setDecisionFlowActions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setDecisionFlowActionsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isDecisionModalOpen, decisionHistory?.run?.pr_id]);
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      return;
+    }
+    fetchCryptoStatus()
+      .then((s) => setCryptoStatus(s))
+      .catch(() => {});
+  }, [settingsOpen]);
 
   function startProgress(action) {
     const stageMap = {
@@ -130,7 +320,145 @@ export default function App() {
     }, 1500);
   }
 
+  async function onProjectChange(e) {
+    const id = Number(e.target.value);
+    if (!id) {
+      return;
+    }
+    setProjectId(id);
+    localStorage.setItem(LS_PROJECT_ID, String(id));
+    setResult(null);
+    setLoadingAction("switch-project");
+    setError("");
+    setInfo("");
+    startProgress("fetch");
+    const projectMeta = projects.find((p) => p.id === id);
+    const repoName = projectMeta?.full_name || "";
+    try {
+      const pr = await fetchDefaultPr(id);
+      const { form: nextForm, noOpenPrs } = buildFormFromDefaultPr(pr);
+      setForm(nextForm);
+      if (noOpenPrs) {
+        setInfo(`No open pull requests for ${repoName}. Enter a PR number or use Show Open PRs when one exists.`);
+      }
+      finishProgress("fetch", "Project loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setForm({
+        pr_id: "",
+        repo: repoName,
+        pr_number: "",
+        title: "",
+        diff: ""
+      });
+      setError(err.message || "Could not load default PR for this project.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onSaveNewProject(e) {
+    e.preventDefault();
+    if (!newProject.full_name.trim() || !newProject.github_token.trim()) {
+      setError("Repository (owner/repo) and GitHub token are required.");
+      return;
+    }
+    setSettingsBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      await createProject({
+        full_name: newProject.full_name.trim(),
+        github_token: newProject.github_token,
+        webhook_secret: newProject.webhook_secret || ""
+      });
+      const res = await fetchProjects();
+      const items = Array.isArray(res?.items) ? res.items : [];
+      setProjects(items);
+      setNewProject({ full_name: "", github_token: "", webhook_secret: "" });
+      if (items.length) {
+        const id = items[items.length - 1].id;
+        setProjectId(id);
+        localStorage.setItem(LS_PROJECT_ID, String(id));
+        const added = items.find((p) => p.id === id);
+        const repoName = added?.full_name || "";
+        try {
+          const pr = await fetchDefaultPr(id);
+          const { form: nextForm, noOpenPrs } = buildFormFromDefaultPr(pr);
+          setForm(nextForm);
+          if (noOpenPrs) {
+            setInfo(`No open pull requests for ${repoName}. Enter a PR number or use Show Open PRs when one exists.`);
+          }
+        } catch (e) {
+          setForm({
+            pr_id: "",
+            repo: repoName,
+            pr_number: "",
+            title: "",
+            diff: ""
+          });
+          setError(e.message || "Project saved, but the repository view could not be loaded.");
+        }
+      }
+    } catch (err) {
+      setError(err.message || "Could not save project.");
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
+  async function onDeleteProject(id) {
+    if (!window.confirm("Remove this project from the app? Stored credentials will be deleted.")) {
+      return;
+    }
+    setSettingsBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      await deleteProject(id);
+      const res = await fetchProjects();
+      const items = Array.isArray(res?.items) ? res.items : [];
+      setProjects(items);
+      if (projectId === id) {
+        setProjectId(items[0]?.id ?? null);
+        if (items[0]) {
+          localStorage.setItem(LS_PROJECT_ID, String(items[0].id));
+          const nextRepo = items[0].full_name || "";
+          try {
+            const pr = await fetchDefaultPr(items[0].id);
+            const { form: nextForm, noOpenPrs } = buildFormFromDefaultPr(pr);
+            setForm(nextForm);
+            if (noOpenPrs) {
+              setInfo(`No open pull requests for ${nextRepo}. Enter a PR number or use Show Open PRs when one exists.`);
+            }
+          } catch (e) {
+            setForm({
+              pr_id: "",
+              repo: nextRepo,
+              pr_number: "",
+              title: "",
+              diff: ""
+            });
+            setError(e.message || "Project removed, but the next repository could not be loaded.");
+          }
+        } else {
+          localStorage.removeItem(LS_PROJECT_ID);
+          setForm({ pr_id: "", repo: "", pr_number: "", title: "", diff: sampleDiff });
+          setResult(null);
+        }
+      }
+    } catch (err) {
+      setError(err.message || "Could not delete project.");
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
   async function onReview() {
+    if (!projectId) {
+      setError("Add a GitHub project in Settings first.");
+      return;
+    }
     if (!form.pr_id || !form.repo || !form.pr_number) {
       setError("Please complete the repository configuration before starting analysis.");
       return;
@@ -139,7 +467,11 @@ export default function App() {
     setError("");
     startProgress("review");
     try {
-      const response = await triggerManualReview({ ...form, pr_number: Number(form.pr_number) });
+      const response = await triggerManualReview({
+        project_id: projectId,
+        ...form,
+        pr_number: Number(form.pr_number)
+      });
       setResult(response.result);
       setShowRawJson(false);
       finishProgress("review", "Analysis complete");
@@ -172,6 +504,331 @@ export default function App() {
     }
   }
 
+  async function onShowOpenPrs() {
+    if (!projectId) {
+      setError("Select a GitHub project first (Settings).");
+      return;
+    }
+    setLoadingAction("open-prs");
+    setError("");
+    startProgress("fetch");
+    try {
+      const response = await fetchOpenPrs(projectId);
+      const items = Array.isArray(response?.pull_requests) ? response.pull_requests : [];
+      setOpenPrs(items);
+      setIsPrModalOpen(true);
+      finishProgress("fetch", "Open PR list loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setError(err.message || "Failed to fetch open PR list.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onSelectOpenPr(prNumber) {
+    if (!projectId) {
+      return;
+    }
+    setLoadingAction("select-pr");
+    setError("");
+    startProgress("fetch");
+    try {
+      const pr = await fetchPrDetails(prNumber, projectId);
+      setForm({
+        pr_id: pr.pr_id || "",
+        repo: pr.repo || "",
+        pr_number: pr.pr_number || "",
+        title: pr.title || "",
+        diff: pr.diff || sampleDiff
+      });
+      setIsPrModalOpen(false);
+      finishProgress("fetch", "Selected PR loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setError(err.message || "Failed to load selected PR.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onPostCommentToGithub() {
+    if (!projectId) {
+      setError("Select a GitHub project in Settings.");
+      return;
+    }
+    if (!form.repo || !form.pr_number) {
+      setError("Select a repository and PR number before posting a comment.");
+      return;
+    }
+    if (!finalComment) {
+      setError("No generated final comment available to post.");
+      return;
+    }
+    setLoadingAction("post-comment");
+    setError("");
+    startProgress("fetch");
+    try {
+      await postPrComment({
+        project_id: projectId,
+        repo: form.repo,
+        pr_number: Number(form.pr_number),
+        body: finalComment
+      });
+      await reloadPrActions();
+      finishProgress("fetch", "Comment posted");
+    } catch (err) {
+      finishProgress("fetch", "Post failed");
+      setError(err.message || "Failed to post comment to GitHub.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onApprovePr() {
+    if (!projectId) {
+      setError("Select a GitHub project in Settings.");
+      return;
+    }
+    if (!form.repo || !form.pr_number) {
+      setError("Select a repository and PR number before approving.");
+      return;
+    }
+    setLoadingAction("approve-pr");
+    setError("");
+    startProgress("fetch");
+    try {
+      await approvePr({
+        project_id: projectId,
+        repo: form.repo,
+        pr_number: Number(form.pr_number)
+      });
+      await reloadPrActions();
+      finishProgress("fetch", "PR approved");
+    } catch (err) {
+      finishProgress("fetch", "Approve failed");
+      setError(err.message || "Failed to approve pull request.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onShowPrHistory() {
+    if (!projectId) {
+      setError("Select a GitHub project first.");
+      return;
+    }
+    setLoadingAction("pr-history");
+    setError("");
+    startProgress("fetch");
+    try {
+      const response = await fetchPrHistory(300, projectId);
+      const items = Array.isArray(response?.items) ? response.items : [];
+      setPrHistoryItems(items);
+      setIsHistoryModalOpen(true);
+      finishProgress("fetch", "PR history loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setError(err.message || "Failed to load PR history.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  function onPickHistoryItem(item) {
+    if (!item?.run_id) {
+      return;
+    }
+    setLoadingAction("decision-flow");
+    setError("");
+    startProgress("fetch");
+    fetchDecisionHistoryByRun(item.run_id)
+      .then((history) => {
+        setDecisionHistory(history);
+        setForm((prev) => ({
+          ...prev,
+          pr_id: item?.pr_id || prev.pr_id,
+          repo: item?.repo || prev.repo,
+          pr_number: item?.pr_number ?? prev.pr_number
+        }));
+        setIsHistoryModalOpen(false);
+        setIsDecisionModalOpen(true);
+        finishProgress("fetch", "Decision flow loaded");
+      })
+      .catch((err) => {
+        finishProgress("fetch", "Load failed");
+        setError(err.message || "Failed to load selected analysis flow.");
+      })
+      .finally(() => {
+        setLoadingAction("");
+      });
+  }
+
+  function formatRunStatus(status) {
+    const normalized = String(status || "").toLowerCase();
+    if (normalized === "completed") {
+      return "pass";
+    }
+    if (normalized === "failed") {
+      return "fail";
+    }
+    return "neutral";
+  }
+
+  function formatRunLabel(status) {
+    return String(status || "unknown").toUpperCase();
+  }
+
+  function formatActionLabel(actionType) {
+    const t = String(actionType || "").toLowerCase();
+    if (t === "comment_added") return "Post comment";
+    if (t === "pr_approved") return "Approve PR";
+    return t.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) || "Action";
+  }
+
+  function renderRunTime(item) {
+    const finished = item?.finished_at ? `Finished: ${item.finished_at}` : "Finished: -";
+    return `Started: ${item?.started_at || "-"} | ${finished}`;
+  }
+
+  async function onGenerateEncryptionKey() {
+    setOnboardingBusy(true);
+    setError("");
+    try {
+      await generateAppSecret();
+      const ob = await fetchOnboardingStatus();
+      setOnboardingStatus(ob);
+      setCryptoStatus(await fetchCryptoStatus());
+    } catch (err) {
+      setError(err.message || "Could not generate or save the encryption key.");
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }
+
+  async function onOnboardingFirstProject(e) {
+    e.preventDefault();
+    if (!newProject.full_name.trim() || !newProject.github_token.trim()) {
+      setError("Repository (owner/repo) and GitHub token are required.");
+      return;
+    }
+    setOnboardingBusy(true);
+    setError("");
+    try {
+      await createProject({
+        full_name: newProject.full_name.trim(),
+        github_token: newProject.github_token,
+        webhook_secret: newProject.webhook_secret || ""
+      });
+      const projRes = await fetchProjects();
+      const items = Array.isArray(projRes?.items) ? projRes.items : [];
+      setProjects(items);
+      const ob = await fetchOnboardingStatus();
+      setOnboardingStatus(ob);
+      setCryptoStatus(await fetchCryptoStatus());
+      setNewProject({ full_name: "", github_token: "", webhook_secret: "" });
+      if (ob.onboarding_complete) {
+        await loadInitialPrForProjects(items);
+      }
+    } catch (err) {
+      setError(err.message || "Could not save the first repository.");
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }
+
+  if (bootstrapping || onboardingStatus === null) {
+    return (
+      <div className="onboarding-fullscreen">
+        <p className="onboarding-loading">Starting application…</p>
+      </div>
+    );
+  }
+
+  if (!onboardingStatus.onboarding_complete) {
+    return (
+      <div className="onboarding-fullscreen">
+        <div className="onboarding-card">
+          <h1 className="onboarding-title">Welcome</h1>
+          <p className="onboarding-lead">Complete setup to use AgentAI PR Reviewer with your GitHub repositories.</p>
+          {error ? (
+            <div className="error-banner" style={{ marginBottom: "1rem" }}>
+              <strong>Error:</strong> {error}
+            </div>
+          ) : null}
+
+          {onboardingStatus.needs_encryption ? (
+            <section className="onboarding-step">
+              <h2>Step 1 of 2 — Encryption key</h2>
+              <p className="onboarding-copy">
+                A server-side key encrypts stored GitHub tokens and webhook secrets. We can generate one and append{" "}
+                <code>APP_SECRET_KEY</code> to your project <code>.env</code> file (repository root). You may restart the API
+                afterward; it is optional if the server picks up the new variable immediately.
+              </p>
+              <button
+                type="button"
+                className="btn primary onboarding-cta"
+                disabled={onboardingBusy}
+                onClick={onGenerateEncryptionKey}
+              >
+                {onboardingBusy ? "Working…" : "Generate key and save to .env"}
+              </button>
+            </section>
+          ) : null}
+
+          {onboardingStatus.needs_first_project ? (
+            <section className="onboarding-step">
+              <h2>First GitHub repository</h2>
+              <p className="onboarding-copy">
+                Enter <strong>owner/repo</strong>, your <strong>GitHub token</strong>, and optionally the <strong>webhook secret</strong>{" "}
+                used for <code>/webhook/github</code>. You can add or remove more repositories later under Settings.
+              </p>
+              <form className="onboarding-form" onSubmit={onOnboardingFirstProject}>
+                <div className="form-group">
+                  <label>Repository (owner/repo)</label>
+                  <input
+                    value={newProject.full_name}
+                    onChange={(e) => setNewProject({ ...newProject, full_name: e.target.value })}
+                    placeholder="organization/service"
+                    autoComplete="off"
+                    disabled={onboardingBusy}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label>GitHub personal access token</label>
+                  <input
+                    type="password"
+                    value={newProject.github_token}
+                    onChange={(e) => setNewProject({ ...newProject, github_token: e.target.value })}
+                    placeholder="ghp_…"
+                    autoComplete="new-password"
+                    disabled={onboardingBusy}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Webhook secret (optional)</label>
+                  <input
+                    type="password"
+                    value={newProject.webhook_secret}
+                    onChange={(e) => setNewProject({ ...newProject, webhook_secret: e.target.value })}
+                    placeholder="Must match GitHub webhook configuration for /webhook/github"
+                    autoComplete="new-password"
+                    disabled={onboardingBusy}
+                  />
+                </div>
+                <button type="submit" className="btn primary onboarding-cta" disabled={onboardingBusy}>
+                  {onboardingBusy ? "Saving…" : "Save and continue"}
+                </button>
+              </form>
+            </section>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   const issues = Array.isArray(result?.issues) ? result.issues : [];
   const reviewInput = result?.review_input || {};
   const testOutput = result?.test_output || {};
@@ -187,20 +844,101 @@ export default function App() {
     });
   const testErrors = Array.isArray(testOutput?.errors) ? testOutput.errors : [];
   const testSuggestions = testOutput?.status === "fail" ? buildTestFixSuggestions(testOutput) : [];
+  const analysisSummaryItems = issues
+    .filter((issue) => issue?.message && !isNoiseIssue(issue))
+    .map((issue) => {
+      const location = issue?.file ? `${issue.file}${issue?.line ? `:${issue.line}` : ""}` : "Location unavailable";
+      const severity = issue?.severity ? String(issue.severity).toUpperCase() : "INFO";
+      return {
+        issueText: `[${severity}] ${issue.message}`,
+        location,
+        resolution:
+          typeof fixOutput?.changes_explained === "string" && fixOutput.changes_explained.trim()
+            ? fixOutput.changes_explained
+            : "Review the impacted logic at the listed location, update behavior to match expected intent, then re-run checks."
+      };
+    });
 
   return (
-    <div className="app-shell">
-      <header className="hero">
-        <h1>AgentAI PR Reviewer</h1>
-        <p>Intelligent multi-agent orchestration for autonomous pull request analysis and correction.</p>
-      </header>
+    <div className="app-page">
+      <div className="hero-surface">
+        <div className="hero-surface-inner">
+          <header className="hero">
+            <div className="hero-row">
+              <div className="hero-title-block">
+                <h1>AgentAI PR Reviewer</h1>
+                <p>Intelligent multi-agent orchestration for autonomous pull request analysis and correction.</p>
+              </div>
+              <div className="hero-actions">
+                <button
+                  className="btn hero-btn"
+                  onClick={onShowPrHistory}
+                  disabled={Boolean(loadingAction) || bootstrapping || !projectId}
+                >
+                  {loadingAction === "pr-history" ? "Loading History..." : "PR History"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-settings hero-btn"
+                  aria-label="Settings"
+                  title="GitHub projects and credentials"
+                  onClick={() => setSettingsOpen(true)}
+                  disabled={bootstrapping}
+                >
+                  <span aria-hidden="true" className="btn-settings-icon">⚙</span>
+                  <span>Settings</span>
+                </button>
+              </div>
+            </div>
+            <div className="hero-toolbar">
+              <label className="project-picker">
+                <span>Project</span>
+                <select
+                  value={projectId ?? ""}
+                  onChange={onProjectChange}
+                  disabled={bootstrapping || !projects.length || Boolean(loadingAction)}
+                >
+                  {!projects.length ? <option value="">No projects yet</option> : null}
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.full_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {loadingAction === "switch-project" && (
+              <div className="project-switch-loader" role="status" aria-live="polite">
+                <span className="project-switch-loader__spinner" />
+                <span>Loading selected project details...</span>
+              </div>
+            )}
+          </header>
+        </div>
+        {error ? (
+          <div className="hero-alert-bar hero-alert-bar--error" role="alert">
+            <strong>Error:</strong> {error}
+          </div>
+        ) : null}
+        {!error && info ? (
+          <div className="hero-alert-bar hero-alert-bar--info">
+            <strong>Note:</strong> {info}
+          </div>
+        ) : null}
+      </div>
 
+      <div className="app-shell">
       <aside className="sidebar">
         <section className="panel">
           <div className="panel-header">
             <h3>Configuration</h3>
           </div>
           <div className="panel-body">
+            {!projects.length && !bootstrapping ? (
+              <p style={{ fontSize: "0.8rem", color: "var(--color-accent-fg)", marginBottom: "1rem" }}>
+                Add a repository under <strong>Settings</strong> (top left). The server must have <code>APP_SECRET_KEY</code> set to store tokens securely.
+              </p>
+            ) : null}
             <div className="form-group">
               <label>Project Identifier</label>
               <input value={form.pr_id} onChange={(e) => setForm({ ...form, pr_id: e.target.value })} placeholder="owner/repo#1" />
@@ -230,9 +968,12 @@ export default function App() {
               <button
                 className="btn primary"
                 onClick={onReview}
-                disabled={Boolean(loadingAction) || bootstrapping}
+                disabled={Boolean(loadingAction) || bootstrapping || !projectId}
               >
                 {loadingAction === "review" ? "Analyzing..." : "Review Logic Flow"}
+              </button>
+              <button className="btn" onClick={onShowOpenPrs} disabled={Boolean(loadingAction) || bootstrapping || !projectId}>
+                {loadingAction === "open-prs" ? "Loading PRs..." : "Show Open PRs"}
               </button>
               <button className="btn" onClick={onFetchResult} disabled={Boolean(loadingAction) || bootstrapping}>
                 {loadingAction === "fetch" ? "Syncing..." : "Retrieve State"}
@@ -270,12 +1011,6 @@ export default function App() {
       </aside>
 
       <main className="main-content">
-        {error && (
-          <div className="error-banner">
-            <strong>Error:</strong> {error}
-          </div>
-        )}
-
         {result ? (
           <>
             <section className="panel">
@@ -307,6 +1042,43 @@ export default function App() {
 
             <section className="panel">
               <div className="panel-header">
+                <h3>Recorded actions</h3>
+              </div>
+              <div className="panel-body">
+                {prActions.length ? (
+                  <ul className="pr-actions-list" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                    {prActions.map((a) => (
+                      <li
+                        key={a.id}
+                        style={{
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: "0.5rem 1rem",
+                          alignItems: "baseline",
+                          padding: "0.5rem 0",
+                          borderBottom: "1px solid var(--color-border-default)"
+                        }}
+                      >
+                        <span className={`status-badge ${a.action_status === "success" ? "pass" : "fail"}`}>
+                          {formatActionLabel(a.action_type)}
+                        </span>
+                        <span style={{ fontSize: "0.82rem", color: "var(--color-fg-muted)" }}>
+                          {a.created_at || ""} · {String(a.actor || "system")}
+                          {a.details ? ` · ${a.details}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p style={{ color: "var(--color-fg-muted)", fontSize: "0.875rem", margin: 0 }}>
+                    No actions logged for this PR yet (e.g. post comment or approve after analysis).
+                  </p>
+                )}
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
                 <h3>Vulnerability & Style Analysis</h3>
               </div>
               <div className="panel-body">
@@ -317,6 +1089,52 @@ export default function App() {
                       {item}
                     </div>
                   )) : <p style={{color: "var(--color-fg-muted)", textAlign: "center", fontSize: "0.875rem"}}>No critical regression or style anomalies detected.</p>}
+                </div>
+                <h3 style={{ fontSize: "0.875rem", marginTop: "1.25rem", marginBottom: "0.75rem" }}>Analysis Summary</h3>
+                <div className="issues-container">
+                  {analysisSummaryItems.length ? (
+                    analysisSummaryItems.map((item, idx) => (
+                      <div key={`${item.location}-${idx}`} className="issue-item" style={{ display: "block" }}>
+                        <p style={{ fontSize: "0.82rem", marginBottom: "0.4rem" }}>
+                          <strong>Issue:</strong> {item.issueText}
+                        </p>
+                        <p style={{ fontSize: "0.82rem", marginBottom: "0.4rem", color: "var(--color-fg-muted)" }}>
+                          <strong>Where:</strong> {item.location}
+                        </p>
+                        <p style={{ fontSize: "0.82rem" }}>
+                          <strong>How to solve:</strong> {item.resolution}
+                        </p>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="issue-item" style={{ display: "block" }}>
+                      <p style={{ fontSize: "0.82rem", marginBottom: "0.4rem" }}>
+                        <strong>Issue:</strong> No actionable issue was detected.
+                      </p>
+                      <p style={{ fontSize: "0.82rem", marginBottom: "0.4rem", color: "var(--color-fg-muted)" }}>
+                        <strong>Where:</strong> Not applicable.
+                      </p>
+                      <p style={{ fontSize: "0.82rem" }}>
+                        <strong>How to solve:</strong> Continue monitoring new PR scans for regressions or style violations.
+                      </p>
+                    </div>
+                  )}
+                </div>
+                <div className="github-action-buttons" style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginTop: "0.75rem" }}>
+                  <button
+                    className="btn"
+                    onClick={onPostCommentToGithub}
+                    disabled={Boolean(loadingAction) || bootstrapping || !finalComment || !projectId}
+                  >
+                    {loadingAction === "post-comment" ? "Posting…" : "Post comment"}
+                  </button>
+                  <button
+                    className="btn"
+                    onClick={onApprovePr}
+                    disabled={Boolean(loadingAction) || bootstrapping || !projectId}
+                  >
+                    {loadingAction === "approve-pr" ? "Approving…" : "Approve PR"}
+                  </button>
                 </div>
               </div>
             </section>
@@ -396,6 +1214,260 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {settingsOpen && (
+        <div className="modal-backdrop" onClick={() => !settingsBusy && setSettingsOpen(false)}>
+          <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>GitHub projects</h3>
+              <button type="button" className="btn modal-close" disabled={settingsBusy} onClick={() => setSettingsOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: "0.8rem", color: "var(--color-fg-muted)", marginBottom: "1rem" }}>
+                Tokens and webhook secrets are stored encrypted (Fernet) when the server has{" "}
+                <code>APP_SECRET_KEY</code> set. Configure the same webhook URL (<code>/webhook/github</code>) on GitHub;
+                signing uses the webhook secret saved per repo.
+              </p>
+              {cryptoStatus && !cryptoStatus.encryption_configured ? (
+                <p style={{ fontSize: "0.85rem", color: "var(--color-danger-fg)", marginBottom: "1rem" }}>
+                  Encryption is off — add projects from the API cannot be persisted securely. Set{" "}
+                  <code>APP_SECRET_KEY</code> on the backend, then restart. {cryptoStatus.hint}
+                </p>
+              ) : null}
+              <h4 style={{ fontSize: "0.8rem", marginBottom: "0.5rem" }}>Registered repositories</h4>
+              {projects.length === 0 ? (
+                <p style={{ color: "var(--color-fg-muted)", fontSize: "0.875rem" }}>None yet. Add one below.</p>
+              ) : (
+                <ul className="settings-project-list">
+                  {projects.map((p) => (
+                    <li key={p.id} className="settings-project-row">
+                      <div>
+                        <strong>{p.full_name}</strong>
+                        <span className="settings-project-meta">
+                          {p.has_github_token ? "Token stored" : "No token"} ·{" "}
+                          {p.has_webhook_secret ? "Webhook secret stored" : "No webhook secret"}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn danger-outline"
+                        disabled={settingsBusy}
+                        onClick={() => onDeleteProject(p.id)}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <form className="settings-add-form" onSubmit={onSaveNewProject}>
+                <h4 style={{ fontSize: "0.8rem", margin: "1.25rem 0 0.5rem" }}>Add repository</h4>
+                <div className="form-group">
+                  <label>Repository (owner/repo)</label>
+                  <input
+                    value={newProject.full_name}
+                    onChange={(e) => setNewProject({ ...newProject, full_name: e.target.value })}
+                    placeholder="org/my-service"
+                    autoComplete="off"
+                    disabled={settingsBusy}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>GitHub personal access token</label>
+                  <input
+                    type="password"
+                    value={newProject.github_token}
+                    onChange={(e) => setNewProject({ ...newProject, github_token: e.target.value })}
+                    placeholder="ghp_…"
+                    autoComplete="new-password"
+                    disabled={settingsBusy}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Webhook secret (optional, for /webhook/github)</label>
+                  <input
+                    type="password"
+                    value={newProject.webhook_secret}
+                    onChange={(e) => setNewProject({ ...newProject, webhook_secret: e.target.value })}
+                    placeholder="Same value as in GitHub webhook settings"
+                    autoComplete="new-password"
+                    disabled={settingsBusy}
+                  />
+                </div>
+                <button type="submit" className="btn primary" disabled={settingsBusy || !cryptoStatus?.encryption_configured}>
+                  {settingsBusy ? "Saving…" : "Save project"}
+                </button>
+                {!cryptoStatus?.encryption_configured ? (
+                  <p style={{ fontSize: "0.75rem", color: "var(--color-fg-muted)", marginTop: "0.5rem" }}>
+                    Save disabled until <code>APP_SECRET_KEY</code> is configured on the server.
+                  </p>
+                ) : null}
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isPrModalOpen && (
+        <div className="modal-backdrop" onClick={() => setIsPrModalOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Open Pull Requests</h3>
+              <button className="btn modal-close" onClick={() => setIsPrModalOpen(false)}>Close</button>
+            </div>
+            <div className="modal-body">
+              {openPrs.length === 0 ? (
+                <p style={{ color: "var(--color-fg-muted)" }}>No open pull requests found.</p>
+              ) : (
+                openPrs.map((pr) => (
+                  <button
+                    key={pr.id || pr.number}
+                    className="pr-row"
+                    onClick={() => onSelectOpenPr(pr.number)}
+                    disabled={Boolean(loadingAction)}
+                  >
+                    <span className="pr-title">#{pr.number} {pr.title || "Untitled PR"}</span>
+                    <span className="pr-meta">{pr.repo}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isDecisionModalOpen && (
+        <div className="modal-backdrop" onClick={() => setIsDecisionModalOpen(false)}>
+          <div className="modal decision-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Agent Decision Flow</h3>
+              <button className="btn modal-close" onClick={() => setIsDecisionModalOpen(false)}>Close</button>
+            </div>
+            <div className="modal-body">
+              {decisionHistory?.run ? (
+                <>
+                  <div className="decision-overview">
+                    <span><strong>PR:</strong> {decisionHistory.run.pr_id}</span>
+                    <span><strong>Run ID:</strong> {decisionHistory.run.id}</span>
+                    <span><strong>Status:</strong> {String(decisionHistory.run.status || "").toUpperCase()}</span>
+                  </div>
+
+                  <div className="decision-user-actions" style={{ marginBottom: "1.25rem" }}>
+                    <h4 style={{ fontSize: "0.9rem", margin: "0 0 0.5rem", color: "var(--color-fg-default)" }}>
+                      Recorded actions (this PR)
+                    </h4>
+                    <p style={{ fontSize: "0.75rem", color: "var(--color-fg-muted)", margin: "0 0 0.75rem" }}>
+                      GitHub actions logged for this pull request (post comment, approve, webhook comments, etc.), same as on the main analysis view.
+                    </p>
+                    {decisionFlowActionsLoading ? (
+                      <p style={{ fontSize: "0.82rem", color: "var(--color-fg-muted)", margin: 0 }}>Loading actions…</p>
+                    ) : decisionFlowActions.length ? (
+                      <ul style={{ listStyle: "none", margin: 0, padding: 0, maxHeight: "200px", overflowY: "auto" }}>
+                        {decisionFlowActions.map((a) => (
+                          <li
+                            key={`df-${a.id}`}
+                            style={{
+                              display: "flex",
+                              flexWrap: "wrap",
+                              gap: "0.35rem 0.75rem",
+                              alignItems: "baseline",
+                              padding: "0.45rem 0",
+                              borderBottom: "1px solid var(--color-border-default)",
+                              fontSize: "0.8rem"
+                            }}
+                          >
+                            <span className={`status-badge ${a.action_status === "success" ? "pass" : "fail"}`}>
+                              {formatActionLabel(a.action_type)}
+                            </span>
+                            <span style={{ color: "var(--color-fg-muted)" }}>
+                              {a.created_at || "—"} · {String(a.actor || "system")}
+                              {a.run_id != null ? ` · run #${a.run_id}` : ""}
+                              {a.details ? ` · ${a.details}` : ""}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p style={{ fontSize: "0.82rem", color: "var(--color-fg-muted)", margin: 0 }}>
+                        No actions recorded for this PR yet.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="decision-rail">
+                    {(decisionHistory.steps || []).map((step) => (
+                      <article className="decision-card" key={step.id}>
+                        <div className="decision-card-head">
+                          <span className="decision-step-chip">Step {step.step_order}</span>
+                          <span className={`status-badge ${step.severity === "high" || step.severity === "critical" ? "fail" : step.severity === "medium" ? "neutral" : "pass"}`}>
+                            {String(step.agent_name || "").toUpperCase()}
+                          </span>
+                        </div>
+                        <p className="decision-line"><strong>Decision:</strong> {step.decision_type}</p>
+                        <p className="decision-line"><strong>Goal:</strong> {step.decision_goal}</p>
+                        <p className="decision-line"><strong>Why:</strong> {step.selection_reason}</p>
+                        <p className="decision-line"><strong>Chosen:</strong> {step.selected_option}</p>
+                        {step.next_action ? <p className="decision-line"><strong>Next:</strong> {step.next_action}</p> : null}
+                        <div className="decision-grid">
+                          <div className="decision-cell">
+                            <h4>Signals</h4>
+                            {(step.signals || []).length ? (
+                              step.signals.map((sig, idx) => (
+                                <p key={`${step.id}-sig-${idx}`}>{sig.signal_type}: {sig.signal_value}</p>
+                              ))
+                            ) : <p>None</p>}
+                          </div>
+                          <div className="decision-cell">
+                            <h4>Policies</h4>
+                            {(step.policy_checks || []).length ? (
+                              step.policy_checks.map((pol, idx) => (
+                                <p key={`${step.id}-pol-${idx}`}>{pol.policy_name}: {pol.result}</p>
+                              ))
+                            ) : <p>None</p>}
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <p style={{ color: "var(--color-fg-muted)" }}>No decision history available for this PR.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isHistoryModalOpen && (
+        <div className="modal-backdrop" onClick={() => setIsHistoryModalOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Analysis History (All Runs)</h3>
+              <button className="btn modal-close" onClick={() => setIsHistoryModalOpen(false)}>Close</button>
+            </div>
+            <div className="modal-body">
+              {prHistoryItems.length === 0 ? (
+                <p style={{ color: "var(--color-fg-muted)" }}>No analyzed PR history found yet.</p>
+              ) : (
+                prHistoryItems.map((item) => (
+                  <button key={`${item.pr_id}-${item.run_id}`} className="pr-row" onClick={() => onPickHistoryItem(item)}>
+                    <span className="pr-title">{item.pr_id} <span style={{ color: "var(--color-fg-muted)", fontWeight: 500 }}>| Run #{item.run_id}</span></span>
+                    <span className="pr-meta">
+                      Status: {formatRunLabel(item.status)} | {renderRunTime(item)}
+                    </span>
+                    <span style={{ marginTop: "0.25rem" }}>
+                      <span className={`status-badge ${formatRunStatus(item.status)}`}>{formatRunLabel(item.status)}</span>
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      </div>
     </div>
   );
 }

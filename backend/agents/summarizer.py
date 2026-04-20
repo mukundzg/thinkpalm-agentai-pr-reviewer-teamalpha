@@ -3,12 +3,12 @@ from __future__ import annotations
 from backend.llm import llm_text
 from backend.memory.vector_store import get_memory_store
 from backend.models import WorkflowState
+from backend.sqlite_store import log_agent_decision
 
 
 def summary_agent(state: WorkflowState) -> WorkflowState:
     issues = state.issues
     fixed = state.fix_output
-    tested = state.test_output
 
     diff_snippet = fixed.patch if fixed and fixed.patch else "No patch generated."
     fallback_comment = "\n".join(
@@ -23,8 +23,6 @@ def summary_agent(state: WorkflowState) -> WorkflowState:
             "```",
             "",
             "### ⚠️ Notes",
-            f"- Tests: {tested.status if tested else 'not run'}",
-            f"- Errors: {', '.join(tested.errors) if tested and tested.errors else 'none'}",
             f"- Explanation: {fixed.changes_explained if fixed else 'no fix output'}",
         ]
     )
@@ -34,13 +32,41 @@ Format a clean GitHub PR comment using this data:
 - Auto-fix attempts: {state.attempts}
 - Patch:
 {diff_snippet[:3000]}
-- Test status: {tested.status if tested else 'not run'}
-- Test errors: {tested.errors if tested else []}
 - Explanation: {fixed.changes_explained if fixed else 'no fix output'}
 Use markdown headers and a diff block.
 """
     llm_comment = llm_text(prompt, system="You are a concise PR review summarizer.")
     state.final_comment = llm_comment.strip() or fallback_comment
+    run_id = int(state.metadata.get("decision_run_id", 0) or 0)
+    step_order = int(state.metadata.get("decision_step_order", 0) or 0) + 1
+    state.metadata["decision_step_order"] = step_order
+    if run_id:
+        log_agent_decision(
+            run_id=run_id,
+            step_order=step_order,
+            agent_name="summarizer",
+            decision_type="final_summary",
+            severity="medium" if state.issues else "low",
+            confidence=0.9,
+            decision_goal="Produce concise, actionable PR summary for publication.",
+            selected_option="Generate markdown final comment from workflow artifacts.",
+            selection_reason=f"Used issues={len(state.issues)}, attempts={state.attempts}, patch_present={bool(fixed and fixed.patch)}.",
+            expected_outcome="Readable final comment suitable for PR posting.",
+            actual_outcome=f"Final comment length={len(state.final_comment)} characters.",
+            next_action="Persist results and optionally publish comment to GitHub.",
+            options=[
+                {"option_key": "A", "option_text": "Generate final markdown summary", "was_selected": True},
+                {"option_key": "B", "option_text": "Skip summary output", "was_selected": False},
+            ],
+            signals=[
+                {"signal_type": "issue_count", "signal_value": len(state.issues)},
+                {"signal_type": "attempts", "signal_value": state.attempts},
+                {"signal_type": "patch_present", "signal_value": bool(fixed and fixed.patch)},
+            ],
+            policy_checks=[
+                {"policy_name": "escalation_rule", "result": "NOT_TRIGGERED", "notes": "Summary produced without manual escalation."},
+            ],
+        )
 
     if issues and fixed:
         get_memory_store().add_pattern(
