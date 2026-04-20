@@ -182,6 +182,7 @@ def review_fast_agent(state: WorkflowState) -> WorkflowState:
 
 
 def review_agent(state: WorkflowState) -> WorkflowState:
+    state.metadata["review_mode"] = "llm_escalated"
     return _run_review_agent(
         state,
         use_llm=True,
