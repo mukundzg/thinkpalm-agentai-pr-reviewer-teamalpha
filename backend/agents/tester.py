@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from backend.confidence import annotate_workflow_confidence
 from backend.models import WorkflowState
 from backend.sqlite_store import log_agent_decision
 from backend.tools.sandbox import run_tests_in_sandbox
@@ -8,6 +9,8 @@ from backend.tools.sandbox import run_tests_in_sandbox
 def test_agent(state: WorkflowState) -> WorkflowState:
     test_output = run_tests_in_sandbox(".")
     state.test_output = test_output
+    score = annotate_workflow_confidence(state)
+    confidence_pct = float(state.metadata.get("confidence_pct", 0.0))
     run_id = int(state.metadata.get("decision_run_id", 0) or 0)
     step_order = int(state.metadata.get("decision_step_order", 0) or 0) + 1
     state.metadata["decision_step_order"] = step_order
@@ -20,10 +23,13 @@ def test_agent(state: WorkflowState) -> WorkflowState:
             agent_name="tester",
             decision_type="verification_result",
             severity="high" if is_fail else "low",
-            confidence=0.95,
+            confidence=score,
             decision_goal="Validate patch behavior by running tests.",
             selected_option="Run sandbox tests and branch workflow by outcome.",
-            selection_reason=f"Test status={test_output.status}; retry_possible={retry_possible}.",
+            selection_reason=(
+                f"Test status={test_output.status}; retry_possible={retry_possible}; "
+                f"confidence={confidence_pct:.1f}%."
+            ),
             expected_outcome="Clear pass/fail signal for retry or summarize path.",
             actual_outcome=f"Tests {test_output.status}; errors={len(test_output.errors)}.",
             next_action="Retry fixer step." if retry_possible else "Proceed to summarizer.",
@@ -35,6 +41,8 @@ def test_agent(state: WorkflowState) -> WorkflowState:
                 {"signal_type": "test_status", "signal_value": test_output.status},
                 {"signal_type": "error_count", "signal_value": len(test_output.errors)},
                 {"signal_type": "command", "signal_value": test_output.command or ""},
+                {"signal_type": "confidence_score", "signal_value": score},
+                {"signal_type": "confidence_pct", "signal_value": confidence_pct},
             ],
             policy_checks=[
                 {"policy_name": "verification_loop", "result": "PASS", "notes": "Executed sandbox tests after fix."},
