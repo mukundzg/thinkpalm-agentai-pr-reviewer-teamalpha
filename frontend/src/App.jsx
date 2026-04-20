@@ -14,6 +14,7 @@ import {
   fetchPrHistory,
   fetchProjects,
   fetchResult,
+  fetchWebhookInbox,
   postPrComment,
   triggerManualReview
 } from "./api";
@@ -120,6 +121,8 @@ export default function App() {
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [onboardingStatus, setOnboardingStatus] = useState(null);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
+  const [isWebhookModalOpen, setIsWebhookModalOpen] = useState(false);
+  const [webhookItems, setWebhookItems] = useState([]);
   const timerRef = useRef(null);
 
   const loadInitialPrForProjects = useCallback(async (items) => {
@@ -665,10 +668,60 @@ export default function App() {
       const items = Array.isArray(response?.items) ? response.items : [];
       setPrHistoryItems(items);
       setIsHistoryModalOpen(true);
-      finishProgress("fetch", "PR history loaded");
+      finishProgress("fetch", "Analysis history loaded");
     } catch (err) {
       finishProgress("fetch", "Load failed");
       setError(err.message || "Failed to load PR history.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onShowWebhookInbox() {
+    setLoadingAction("webhook-inbox");
+    setError("");
+    startProgress("fetch");
+    try {
+      const response = await fetchWebhookInbox(200);
+      const items = Array.isArray(response?.items) ? response.items : [];
+      setWebhookItems(items);
+      setIsWebhookModalOpen(true);
+      finishProgress("fetch", "PR inbox loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setError(err.message || "Failed to load webhook PR list.");
+    } finally {
+      setLoadingAction("");
+    }
+  }
+
+  async function onPickWebhookItem(item) {
+    const nextProjectId = item?.project_id ? Number(item.project_id) : null;
+    const prNumber = item?.pr_number ? Number(item.pr_number) : null;
+    if (!nextProjectId || !prNumber) {
+      setError("This webhook item is missing project or PR reference.");
+      return;
+    }
+    setLoadingAction("select-webhook-pr");
+    setError("");
+    startProgress("fetch");
+    try {
+      setProjectId(nextProjectId);
+      localStorage.setItem(LS_PROJECT_ID, String(nextProjectId));
+      const pr = await fetchPrDetails(prNumber, nextProjectId);
+      setForm({
+        pr_id: pr.pr_id || "",
+        repo: pr.repo || "",
+        pr_number: pr.pr_number || "",
+        title: pr.title || "",
+        diff: pr.diff || sampleDiff
+      });
+      setResult(null);
+      setIsWebhookModalOpen(false);
+      finishProgress("fetch", "Webhook PR loaded");
+    } catch (err) {
+      finishProgress("fetch", "Load failed");
+      setError(err.message || "Failed to load selected webhook PR.");
     } finally {
       setLoadingAction("");
     }
@@ -911,10 +964,17 @@ export default function App() {
               <div className="hero-actions">
                 <button
                   className="btn hero-btn"
+                  onClick={onShowWebhookInbox}
+                  disabled={Boolean(loadingAction) || bootstrapping}
+                >
+                  {loadingAction === "webhook-inbox" ? "Loading PR Inbox..." : "PR Inbox"}
+                </button>
+                <button
+                  className="btn hero-btn"
                   onClick={onShowPrHistory}
                   disabled={Boolean(loadingAction) || bootstrapping || !projectId}
                 >
-                  {loadingAction === "pr-history" ? "Loading History..." : "PR History"}
+                  {loadingAction === "pr-history" ? "Loading History..." : "Analysis History"}
                 </button>
                 <button
                   type="button"
@@ -1499,6 +1559,39 @@ export default function App() {
                     <span style={{ marginTop: "0.25rem" }}>
                       <span className={`status-badge ${formatRunStatus(item.status)}`}>{formatRunLabel(item.status)}</span>
                     </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isWebhookModalOpen && (
+        <div className="modal-backdrop" onClick={() => setIsWebhookModalOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>PR Inbox</h3>
+              <button className="btn modal-close" onClick={() => setIsWebhookModalOpen(false)}>Close</button>
+            </div>
+            <div className="modal-body">
+              {webhookItems.length === 0 ? (
+                <p style={{ color: "var(--color-fg-muted)" }}>No webhook PR events captured yet.</p>
+              ) : (
+                webhookItems.map((item) => (
+                  <button
+                    key={`wh-${item.id}`}
+                    className="pr-row"
+                    onClick={() => onPickWebhookItem(item)}
+                    disabled={Boolean(loadingAction)}
+                  >
+                    <span className="pr-title">
+                      {item.pr_id} <span style={{ color: "var(--color-fg-muted)", fontWeight: 500 }}>| {item.action}</span>
+                    </span>
+                    <span className="pr-meta">
+                      Project #{item.project_id ?? "-"} | Status: {String(item.processed_status || "").toUpperCase()} | Received: {item.received_at || "-"}
+                    </span>
+                    {item.title ? <span className="pr-meta">{item.title}</span> : null}
                   </button>
                 ))
               )}

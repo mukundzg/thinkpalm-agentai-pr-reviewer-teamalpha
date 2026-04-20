@@ -173,3 +173,15 @@ export async function fetchPrActions(prId) {
   }
   return res.json();
 }
+
+export async function fetchWebhookInbox(limit = 100, projectId) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (projectId != null && projectId !== "") {
+    params.set("project_id", String(projectId));
+  }
+  const res = await fetch(`${API_BASE}/webhook/inbox?${params.toString()}`);
+  if (!res.ok) {
+    throw new Error(await parseError(res, "Webhook inbox fetch failed"));
+  }
+  return res.json();
+}
