@@ -31,6 +31,22 @@ const sampleDiff = `diff --git a/example.py b/example.py
      return True
  `;
 
+function buildFormFromDefaultPr(pr) {
+  const noOpenPrs = Boolean(pr?.no_open_prs);
+  const prNumberRaw = pr?.pr_number;
+  const diffStr = pr?.diff != null ? String(pr.diff) : "";
+  return {
+    form: {
+      pr_id: pr?.pr_id != null ? String(pr.pr_id) : "",
+      repo: pr?.repo != null ? String(pr.repo) : "",
+      pr_number: prNumberRaw != null && prNumberRaw !== "" ? String(prNumberRaw) : "",
+      title: pr?.title != null ? String(pr.title) : "",
+      diff: noOpenPrs ? "" : diffStr.trim() ? diffStr : sampleDiff
+    },
+    noOpenPrs
+  };
+}
+
 function isNoiseIssue(issue) {
   const message = String(issue?.message || "").toLowerCase();
   return (
@@ -82,6 +98,7 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [loadingAction, setLoadingAction] = useState("");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [bootstrapping, setBootstrapping] = useState(true);
   const [showRawJson, setShowRawJson] = useState(false);
   const [reviewProgress, setReviewProgress] = useState({ value: 0, label: "" });
@@ -116,14 +133,30 @@ export default function App() {
     }
     setProjectId(chosen);
     localStorage.setItem(LS_PROJECT_ID, String(chosen));
-    const pr = await fetchDefaultPr(chosen);
-    setForm({
-      pr_id: pr.pr_id,
-      repo: pr.repo,
-      pr_number: pr.pr_number,
-      title: pr.title,
-      diff: pr.diff || sampleDiff
-    });
+    const projectMeta = items.find((p) => p.id === chosen);
+    const repoName = projectMeta?.full_name || "";
+    try {
+      const pr = await fetchDefaultPr(chosen);
+      const { form: nextForm, noOpenPrs } = buildFormFromDefaultPr(pr);
+      setForm(nextForm);
+      if (noOpenPrs) {
+        setInfo(`No open pull requests for ${repoName}. Enter a PR number or use Show Open PRs when one exists.`);
+        setError("");
+      } else {
+        setInfo("");
+        setError("");
+      }
+    } catch (e) {
+      setForm({
+        pr_id: "",
+        repo: repoName,
+        pr_number: "",
+        title: "",
+        diff: ""
+      });
+      setInfo("");
+      setError(e.message || "Could not load the default pull request for this project.");
+    }
   }, []);
 
   async function reloadPrActions() {
@@ -186,6 +219,12 @@ export default function App() {
       cancelled = true;
     };
   }, [loadInitialPrForProjects]);
+
+  useEffect(() => {
+    if (error) {
+      setInfo("");
+    }
+  }, [error]);
 
   useEffect(() => {
     if (!result || !form.pr_id) {
@@ -291,19 +330,27 @@ export default function App() {
     setResult(null);
     setLoadingAction("switch-project");
     setError("");
+    setInfo("");
     startProgress("fetch");
+    const projectMeta = projects.find((p) => p.id === id);
+    const repoName = projectMeta?.full_name || "";
     try {
       const pr = await fetchDefaultPr(id);
-      setForm({
-        pr_id: pr.pr_id,
-        repo: pr.repo,
-        pr_number: pr.pr_number,
-        title: pr.title,
-        diff: pr.diff || sampleDiff
-      });
+      const { form: nextForm, noOpenPrs } = buildFormFromDefaultPr(pr);
+      setForm(nextForm);
+      if (noOpenPrs) {
+        setInfo(`No open pull requests for ${repoName}. Enter a PR number or use Show Open PRs when one exists.`);
+      }
       finishProgress("fetch", "Project loaded");
     } catch (err) {
       finishProgress("fetch", "Load failed");
+      setForm({
+        pr_id: "",
+        repo: repoName,
+        pr_number: "",
+        title: "",
+        diff: ""
+      });
       setError(err.message || "Could not load default PR for this project.");
     } finally {
       setLoadingAction("");
@@ -318,6 +365,7 @@ export default function App() {
     }
     setSettingsBusy(true);
     setError("");
+    setInfo("");
     try {
       await createProject({
         full_name: newProject.full_name.trim(),
@@ -332,14 +380,25 @@ export default function App() {
         const id = items[items.length - 1].id;
         setProjectId(id);
         localStorage.setItem(LS_PROJECT_ID, String(id));
-        const pr = await fetchDefaultPr(id);
-        setForm({
-          pr_id: pr.pr_id,
-          repo: pr.repo,
-          pr_number: pr.pr_number,
-          title: pr.title,
-          diff: pr.diff || sampleDiff
-        });
+        const added = items.find((p) => p.id === id);
+        const repoName = added?.full_name || "";
+        try {
+          const pr = await fetchDefaultPr(id);
+          const { form: nextForm, noOpenPrs } = buildFormFromDefaultPr(pr);
+          setForm(nextForm);
+          if (noOpenPrs) {
+            setInfo(`No open pull requests for ${repoName}. Enter a PR number or use Show Open PRs when one exists.`);
+          }
+        } catch (e) {
+          setForm({
+            pr_id: "",
+            repo: repoName,
+            pr_number: "",
+            title: "",
+            diff: ""
+          });
+          setError(e.message || "Project saved, but the repository view could not be loaded.");
+        }
       }
     } catch (err) {
       setError(err.message || "Could not save project.");
@@ -354,6 +413,7 @@ export default function App() {
     }
     setSettingsBusy(true);
     setError("");
+    setInfo("");
     try {
       await deleteProject(id);
       const res = await fetchProjects();
@@ -363,14 +423,24 @@ export default function App() {
         setProjectId(items[0]?.id ?? null);
         if (items[0]) {
           localStorage.setItem(LS_PROJECT_ID, String(items[0].id));
-          const pr = await fetchDefaultPr(items[0].id);
-          setForm({
-            pr_id: pr.pr_id,
-            repo: pr.repo,
-            pr_number: pr.pr_number,
-            title: pr.title,
-            diff: pr.diff || sampleDiff
-          });
+          const nextRepo = items[0].full_name || "";
+          try {
+            const pr = await fetchDefaultPr(items[0].id);
+            const { form: nextForm, noOpenPrs } = buildFormFromDefaultPr(pr);
+            setForm(nextForm);
+            if (noOpenPrs) {
+              setInfo(`No open pull requests for ${nextRepo}. Enter a PR number or use Show Open PRs when one exists.`);
+            }
+          } catch (e) {
+            setForm({
+              pr_id: "",
+              repo: nextRepo,
+              pr_number: "",
+              title: "",
+              diff: ""
+            });
+            setError(e.message || "Project removed, but the next repository could not be loaded.");
+          }
         } else {
           localStorage.removeItem(LS_PROJECT_ID);
           setForm({ pr_id: "", repo: "", pr_number: "", title: "", diff: sampleDiff });
@@ -790,52 +860,67 @@ export default function App() {
     });
 
   return (
-    <div className="app-shell">
-      <header className="hero">
-        <div className="hero-toolbar">
-          <button
-            type="button"
-            className="btn btn-settings"
-            aria-label="Settings"
-            title="GitHub projects and credentials"
-            onClick={() => setSettingsOpen(true)}
-            disabled={bootstrapping}
-          >
-            Settings
-          </button>
-          <label className="project-picker">
-            <span>Project</span>
-            <select
-              value={projectId ?? ""}
-              onChange={onProjectChange}
-              disabled={bootstrapping || !projects.length || Boolean(loadingAction)}
-            >
-              {!projects.length ? <option value="">No projects yet</option> : null}
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.full_name}
-                </option>
-              ))}
-            </select>
-          </label>
+    <div className="app-page">
+      <div className="hero-surface">
+        <div className="hero-surface-inner">
+          <header className="hero">
+            <div className="hero-toolbar">
+              <button
+                type="button"
+                className="btn btn-settings"
+                aria-label="Settings"
+                title="GitHub projects and credentials"
+                onClick={() => setSettingsOpen(true)}
+                disabled={bootstrapping}
+              >
+                Settings
+              </button>
+              <label className="project-picker">
+                <span>Project</span>
+                <select
+                  value={projectId ?? ""}
+                  onChange={onProjectChange}
+                  disabled={bootstrapping || !projects.length || Boolean(loadingAction)}
+                >
+                  {!projects.length ? <option value="">No projects yet</option> : null}
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.full_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="hero-row">
+              <div>
+                <h1>AgentAI PR Reviewer</h1>
+                <p>Intelligent multi-agent orchestration for autonomous pull request analysis and correction.</p>
+              </div>
+              <div className="hero-actions">
+                <button
+                  className="btn hero-btn"
+                  onClick={onShowPrHistory}
+                  disabled={Boolean(loadingAction) || bootstrapping || !projectId}
+                >
+                  {loadingAction === "pr-history" ? "Loading History..." : "PR History"}
+                </button>
+              </div>
+            </div>
+          </header>
         </div>
-        <div className="hero-row">
-          <div>
-            <h1>AgentAI PR Reviewer</h1>
-            <p>Intelligent multi-agent orchestration for autonomous pull request analysis and correction.</p>
+        {error ? (
+          <div className="hero-alert-bar hero-alert-bar--error" role="alert">
+            <strong>Error:</strong> {error}
           </div>
-          <div className="hero-actions">
-            <button
-              className="btn hero-btn"
-              onClick={onShowPrHistory}
-              disabled={Boolean(loadingAction) || bootstrapping || !projectId}
-            >
-              {loadingAction === "pr-history" ? "Loading History..." : "PR History"}
-            </button>
+        ) : null}
+        {!error && info ? (
+          <div className="hero-alert-bar hero-alert-bar--info">
+            <strong>Note:</strong> {info}
           </div>
-        </div>
-      </header>
+        ) : null}
+      </div>
 
+      <div className="app-shell">
       <aside className="sidebar">
         <section className="panel">
           <div className="panel-header">
@@ -919,12 +1004,6 @@ export default function App() {
       </aside>
 
       <main className="main-content">
-        {error && (
-          <div className="error-banner">
-            <strong>Error:</strong> {error}
-          </div>
-        )}
-
         {result ? (
           <>
             <section className="panel">
@@ -1381,6 +1460,7 @@ export default function App() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

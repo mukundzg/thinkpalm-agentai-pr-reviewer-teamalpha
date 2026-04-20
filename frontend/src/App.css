@@ -25,23 +25,62 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-.app-shell {
+.app-page {
+  width: 100%;
+  min-height: 100vh;
+}
+
+.hero-surface {
+  width: 100%;
+  background-color: var(--color-canvas-default);
+  border-bottom: 1px solid var(--color-border-default);
+  box-shadow: var(--shadow-sm);
+}
+
+.hero-surface-inner {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 2rem;
-  display: grid;
-  grid-template-areas: 
-    "header header"
-    "sidebar main";
-  grid-template-columns: 350px 1fr;
-  gap: 2rem;
+  padding: 2rem 2rem 1.25rem;
 }
 
 header.hero {
-  grid-area: header;
-  border-bottom: 1px solid var(--color-border-default);
-  padding-bottom: 2rem;
-  margin-bottom: 1rem;
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 0;
+}
+
+.hero-alert-bar {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.9rem clamp(1rem, 4vw, 3rem);
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.hero-alert-bar--error {
+  background-color: #ffebe9;
+  border-top: 1px solid #ffc1bc;
+  color: #a40e26;
+}
+
+.hero-alert-bar--info {
+  background-color: #ddf4ff;
+  border-top: 1px solid #b6e0ff;
+  color: #0550ae;
+}
+
+.app-shell {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 2rem 2rem;
+  display: grid;
+  grid-template-areas: "sidebar main";
+  grid-template-columns: 350px 1fr;
+  gap: 2rem;
 }
 
 header.hero h1 {
@@ -297,13 +336,27 @@ pre {
   gap: 0.75rem;
 }
 
+.info-banner {
+  background-color: #ddf4ff;
+  border: 1px solid #b6e0ff;
+  color: #0969da;
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 @media (max-width: 900px) {
   .app-shell {
-    grid-template-areas: 
-      "header"
-      "sidebar"
-      "main";
+    grid-template-areas: "sidebar" "main";
     grid-template-columns: 1fr;
+  }
+
+  .hero-surface-inner {
+    padding: 1.25rem 1.25rem 1rem;
   }
 
   .hero-row {
