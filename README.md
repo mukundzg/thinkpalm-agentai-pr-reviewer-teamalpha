@@ -1,5 +1,9 @@
 # PR Review Multi-Agent System
 
+## Problem Statement
+
+Engineering teams lose significant time in pull request review cycles due to repetitive manual checks, inconsistent review quality, and delayed feedback on regressions. Traditional pipelines often validate syntax and tests but still miss semantic logic errors, while fully manual review does not scale across multiple repositories and contributors. This project addresses that gap by combining deterministic analysis, confidence-gated escalation, LLM-assisted reasoning, and automated test verification to deliver faster, more reliable, and actionable PR feedback.
+
 This project implements a GitHub pull request review pipeline:
 
 GitHub PR → webhook or manual UI → FastAPI backend → LangGraph multi-agent workflow → tools + memory → PR comments, approvals, and a React dashboard.
@@ -96,14 +100,38 @@ Reviewer, fixer, and summarizer read these settings automatically.
 ## Workflow
 
 ```text
-START → Reviewer → Fix Generator → Test Agent
-                          | (on fail, max attempts)
-                          v
-                    Fix Generator (retry)
-                          |
-                          v
-                      Summary → END
+START → Reviewer Fast (deterministic + lint) → Test Agent
+                                      |
+                                      | confidence gate:
+                                      | - escalate if business_logic_change OR semantic_risk
+                                      | - escalate if confidence_score < confidence_threshold
+                                      v
+                      Reviewer (LLM) → Fix Generator (LLM) → Test Agent
+                                               | (on fail, max attempts)
+                                               v
+                                        Fix Generator (retry)
+                                               |
+                                               v
+                                          Summary (LLM/fallback) → END
 ```
+
+- `confidence_threshold` defaults to `0.5` and adapts to `0.4` for arithmetic/control-flow mutation risk.
+- LLM is invoked in `Reviewer` (issue extraction), `Fix Generator` (patch proposal), and `Summary` (final comment with fallback).
+
+## Agents
+
+- **`Reviewer Fast` (`backend/agents/reviewer.py`)**: Runs deterministic checks and lint ingestion without LLM calls. It is used first to keep low-risk PRs fast and cheap.
+- **`Test Agent` (`backend/agents/tester.py`)**: Executes tests through the sandbox runner and records `test_output`. It also computes confidence metadata (`confidence_score`, `semantic_risk`, `business_logic_change`, and adaptive threshold inputs).
+- **`Reviewer` (`backend/agents/reviewer.py`)**: Escalated reviewer that uses LLM (`llm_json`) to extract structured issues (type, severity, location, message) from the diff.
+- **`Fix Generator` (`backend/agents/fixer.py`)**: Uses LLM (`llm_json`) plus issue context to propose patch-ready improvements and explanation text; may retry if tests fail and retry budget remains.
+- **`Summary` (`backend/agents/summarizer.py`)**: Produces final PR comment using LLM (`llm_text`) with fallback formatting when LLM output is unavailable.
+
+### Agent Routing Behavior
+
+- Start with `Reviewer Fast` and `Test Agent`.
+- Escalate to LLM path when `business_logic_change` or `semantic_risk` is true, or when `confidence_score < confidence_threshold`.
+- On escalated path, `Fix Generator` is retried only when tests fail and retry budget remains.
+- End with `Summary`, which persists a final human-readable review comment.
 
 ## Setup
 
