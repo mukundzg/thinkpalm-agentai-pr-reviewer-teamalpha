@@ -33,24 +33,38 @@ GitHub PR → webhook or manual UI → FastAPI backend → LangGraph multi-agent
 
 ```text
 backend/
+  agents/
+  graph/
+  memory/
+  tools/
   main.py
   models.py
-  agents/
-  tools/
-  memory/
-  graph/
+  llm.py
+  confidence.py
   sqlite_store.py
   secrets_crypto.py
   preflight.py
 frontend/
   src/
+  __tests__/
+docs/
+  architecture-diagram.png
+  one-page-writeup.md
+  screenshots/
+tests/
 README.md
+docker-compose.yml
+pytest.ini
 .env.example
 ```
 
 ## Screenshots
 
-- UI and workflow screenshots are available in `docs/screenshots/`.
+- UI and workflow screenshots are available in [`docs/screenshots/`](docs/screenshots/).
+
+## Demo Video
+
+- Watch the project demo on Loom [here](https://www.loom.com/share/330d2fa4eb4f4cc6801c880073edf178).
 
 ## Configuration
 
@@ -277,7 +291,7 @@ Set `VITE_API_BASE` if the API is not at `http://localhost:8000`.
 
 ```bash
 cd /path/to/repo
-python -m pytest backend/tests/ -q
+python -m pytest tests/ -q
 ```
 
 ### 4) Docker Compose
