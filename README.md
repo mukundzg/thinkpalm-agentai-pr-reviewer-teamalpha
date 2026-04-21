@@ -48,6 +48,10 @@ README.md
 .env.example
 ```
 
+## Screenshots
+
+- UI and workflow screenshots are available in `docs/screenshots/`.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and adjust.
