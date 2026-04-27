@@ -125,6 +125,14 @@ export default function App() {
   const [webhookItems, setWebhookItems] = useState([]);
   const timerRef = useRef(null);
 
+  function resetAnalysisState() {
+    setResult(null);
+    setPrActions([]);
+    setDecisionHistory(null);
+    setDecisionFlowActions([]);
+    setIsDecisionModalOpen(false);
+  }
+
   const loadInitialPrForProjects = useCallback(async (items) => {
     if (!Array.isArray(items) || !items.length) {
       return;
@@ -136,6 +144,7 @@ export default function App() {
     }
     setProjectId(chosen);
     localStorage.setItem(LS_PROJECT_ID, String(chosen));
+    resetAnalysisState();
     const projectMeta = items.find((p) => p.id === chosen);
     const repoName = projectMeta?.full_name || "";
     try {
@@ -369,7 +378,7 @@ export default function App() {
     }
     setProjectId(id);
     localStorage.setItem(LS_PROJECT_ID, String(id));
-    setResult(null);
+    resetAnalysisState();
     setLoadingAction("switch-project");
     setError("");
     setInfo("");
@@ -422,6 +431,7 @@ export default function App() {
         const id = items[items.length - 1].id;
         setProjectId(id);
         localStorage.setItem(LS_PROJECT_ID, String(id));
+        resetAnalysisState();
         const added = items.find((p) => p.id === id);
         const repoName = added?.full_name || "";
         try {
@@ -463,6 +473,7 @@ export default function App() {
       setProjects(items);
       if (projectId === id) {
         setProjectId(items[0]?.id ?? null);
+        resetAnalysisState();
         if (items[0]) {
           localStorage.setItem(LS_PROJECT_ID, String(items[0].id));
           const nextRepo = items[0].full_name || "";
@@ -577,6 +588,7 @@ export default function App() {
     startProgress("fetch");
     try {
       const pr = await fetchPrDetails(prNumber, projectId);
+      resetAnalysisState();
       setForm({
         pr_id: pr.pr_id || "",
         repo: pr.repo || "",
@@ -709,6 +721,7 @@ export default function App() {
       setProjectId(nextProjectId);
       localStorage.setItem(LS_PROJECT_ID, String(nextProjectId));
       const pr = await fetchPrDetails(prNumber, nextProjectId);
+      resetAnalysisState();
       setForm({
         pr_id: pr.pr_id || "",
         repo: pr.repo || "",
@@ -716,7 +729,6 @@ export default function App() {
         title: pr.title || "",
         diff: pr.diff || sampleDiff
       });
-      setResult(null);
       setIsWebhookModalOpen(false);
       finishProgress("fetch", "Webhook PR loaded");
     } catch (err) {
