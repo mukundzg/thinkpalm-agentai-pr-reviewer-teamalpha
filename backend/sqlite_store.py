@@ -40,6 +40,12 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE webhook_pr_events ADD COLUMN processed_at DATETIME")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_project_id ON webhook_pr_events(project_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_received_at ON webhook_pr_events(received_at)")
+    if "provider" not in cols:
+        conn.execute("ALTER TABLE webhook_pr_events ADD COLUMN provider TEXT NOT NULL DEFAULT 'github'")
+
+    cols = _table_columns(conn, "pr_actions")
+    if "provider" not in cols:
+        conn.execute("ALTER TABLE pr_actions ADD COLUMN provider TEXT NOT NULL DEFAULT 'github'")
 
 
 def _bootstrap_project_from_env() -> None:
@@ -79,6 +85,35 @@ def _bootstrap_project_from_env() -> None:
             (repo, tok_e, wh_e),
         )
         conn.commit()
+
+
+def _sync_legacy_github_projects(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT full_name, github_token_encrypted, webhook_secret_encrypted
+        FROM github_projects
+        """
+    ).fetchall()
+    for row in rows:
+        exists = conn.execute(
+            """
+            SELECT id FROM project_integrations
+            WHERE full_name = ? AND scm_provider = 'github'
+            LIMIT 1
+            """,
+            (row[0],),
+        ).fetchone()
+        if exists:
+            continue
+        conn.execute(
+            """
+            INSERT INTO project_integrations (
+                full_name, scm_provider, tracker_provider, scm_token_encrypted, webhook_secret_encrypted, updated_at
+            )
+            VALUES (?, 'github', '', ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (row[0], row[1], row[2]),
+        )
 
 
 def init_db() -> None:
@@ -186,6 +221,7 @@ def init_db() -> None:
                 pr_id TEXT NOT NULL,
                 repo TEXT NOT NULL,
                 pr_number INTEGER NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'github',
                 action_type TEXT NOT NULL,
                 action_status TEXT NOT NULL DEFAULT 'success',
                 actor TEXT NOT NULL DEFAULT 'system',
@@ -213,10 +249,30 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_github_projects_full_name ON github_projects(full_name)")
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS project_integrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL,
+                scm_provider TEXT NOT NULL DEFAULT 'github',
+                tracker_provider TEXT NOT NULL DEFAULT '',
+                scm_token_encrypted TEXT,
+                webhook_secret_encrypted TEXT,
+                tracker_token_encrypted TEXT,
+                tracker_project_key TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(full_name, scm_provider)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_project_integrations_name ON project_integrations(full_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_project_integrations_scm ON project_integrations(scm_provider)")
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS webhook_pr_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 delivery_id TEXT,
                 project_id INTEGER,
+                provider TEXT NOT NULL DEFAULT 'github',
                 repo TEXT NOT NULL,
                 pr_number INTEGER NOT NULL,
                 pr_id TEXT NOT NULL,
@@ -234,6 +290,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_pr_id ON webhook_pr_events(pr_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_delivery_id ON webhook_pr_events(delivery_id)")
         _apply_schema_migrations(conn)
+        _sync_legacy_github_projects(conn)
         conn.commit()
     _bootstrap_project_from_env()
 
@@ -648,19 +705,21 @@ def log_pr_action(
     details: str | None = None,
     run_id: int | None = None,
     project_id: int | None = None,
+    provider: str = "github",
 ) -> int:
     with sqlite3.connect(_db_path()) as conn:
         cur = conn.execute(
             """
             INSERT INTO pr_actions (
-                pr_id, repo, pr_number, action_type, action_status, actor, details, run_id, project_id
+                pr_id, repo, pr_number, provider, action_type, action_status, actor, details, run_id, project_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 pr_id,
                 repo,
                 pr_number,
+                provider,
                 action_type,
                 action_status,
                 actor,
@@ -679,7 +738,7 @@ def get_pr_actions(pr_id: str, limit: int = 200) -> list[dict[str, Any]]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT id, pr_id, repo, pr_number, action_type, action_status, actor, details, run_id, project_id, created_at
+            SELECT id, pr_id, repo, pr_number, provider, action_type, action_status, actor, details, run_id, project_id, created_at
             FROM pr_actions
             WHERE pr_id = ?
             ORDER BY id DESC
@@ -693,6 +752,7 @@ def get_pr_actions(pr_id: str, limit: int = 200) -> list[dict[str, Any]]:
             "pr_id": row["pr_id"],
             "repo": row["repo"],
             "pr_number": row["pr_number"],
+            "provider": row["provider"],
             "action_type": row["action_type"],
             "action_status": row["action_status"],
             "actor": row["actor"],
@@ -729,6 +789,85 @@ def list_projects_public() -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def list_integrations_public() -> list[dict[str, Any]]:
+    with sqlite3.connect(_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, full_name, scm_provider, tracker_provider, tracker_project_key, created_at, updated_at,
+                   CASE WHEN scm_token_encrypted IS NOT NULL AND TRIM(scm_token_encrypted) != '' THEN 1 ELSE 0 END AS has_scm_token,
+                   CASE WHEN webhook_secret_encrypted IS NOT NULL AND TRIM(webhook_secret_encrypted) != '' THEN 1 ELSE 0 END AS has_webhook_secret,
+                   CASE WHEN tracker_token_encrypted IS NOT NULL AND TRIM(tracker_token_encrypted) != '' THEN 1 ELSE 0 END AS has_tracker_token
+            FROM project_integrations
+            ORDER BY full_name ASC, scm_provider ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_integration_row_by_id(project_id: int) -> dict[str, Any] | None:
+    with sqlite3.connect(_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, full_name, scm_provider, tracker_provider, scm_token_encrypted, webhook_secret_encrypted,
+                   tracker_token_encrypted, tracker_project_key, created_at, updated_at
+            FROM project_integrations
+            WHERE id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_integration_row_by_full_name(full_name: str, scm_provider: str = "github") -> dict[str, Any] | None:
+    with sqlite3.connect(_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, full_name, scm_provider, tracker_provider, scm_token_encrypted, webhook_secret_encrypted,
+                   tracker_token_encrypted, tracker_project_key, created_at, updated_at
+            FROM project_integrations
+            WHERE full_name = ? AND scm_provider = ?
+            """,
+            (full_name.strip(), scm_provider.strip().lower() or "github"),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_integration(
+    *,
+    full_name: str,
+    scm_provider: str,
+    scm_token_encrypted: str,
+    webhook_secret_encrypted: str,
+    tracker_provider: str = "",
+    tracker_token_encrypted: str = "",
+    tracker_project_key: str = "",
+) -> int:
+    with sqlite3.connect(_db_path()) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO project_integrations (
+                full_name, scm_provider, tracker_provider, scm_token_encrypted, webhook_secret_encrypted,
+                tracker_token_encrypted, tracker_project_key, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                full_name.strip(),
+                scm_provider.strip().lower() or "github",
+                tracker_provider.strip().lower(),
+                scm_token_encrypted or None,
+                webhook_secret_encrypted or None,
+                tracker_token_encrypted or None,
+                tracker_project_key or None,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
 
 
 def get_githubproject_row_by_id(project_id: int) -> dict[str, Any] | None:
@@ -826,19 +965,21 @@ def log_webhook_pr_event(
     sender_login: str | None,
     event_json: dict[str, Any] | None = None,
     processed_status: str = "received",
+    provider: str = "github",
 ) -> int:
     payload = json.dumps(jsonable_encoder(event_json or {})) if event_json else None
     with sqlite3.connect(_db_path()) as conn:
         cur = conn.execute(
             """
             INSERT INTO webhook_pr_events (
-                delivery_id, project_id, repo, pr_number, pr_id, title, action, sender_login, event_json, processed_status
+                delivery_id, project_id, provider, repo, pr_number, pr_id, title, action, sender_login, event_json, processed_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 delivery_id,
                 project_id,
+                provider,
                 repo,
                 pr_number,
                 pr_id,
@@ -874,7 +1015,7 @@ def list_webhook_pr_events(limit: int = 100, project_id: int | None = None) -> l
             rows = conn.execute(
                 """
                 SELECT id, delivery_id, project_id, repo, pr_number, pr_id, title, action, sender_login,
-                       processed_status, processed_at, received_at
+                       provider, processed_status, processed_at, received_at
                 FROM webhook_pr_events
                 ORDER BY id DESC
                 LIMIT ?
@@ -885,7 +1026,7 @@ def list_webhook_pr_events(limit: int = 100, project_id: int | None = None) -> l
             rows = conn.execute(
                 """
                 SELECT id, delivery_id, project_id, repo, pr_number, pr_id, title, action, sender_login,
-                       processed_status, processed_at, received_at
+                       provider, processed_status, processed_at, received_at
                 FROM webhook_pr_events
                 WHERE project_id = ?
                 ORDER BY id DESC
@@ -898,6 +1039,7 @@ def list_webhook_pr_events(limit: int = 100, project_id: int | None = None) -> l
             "id": row["id"],
             "delivery_id": row["delivery_id"],
             "project_id": row["project_id"],
+            "provider": row["provider"],
             "repo": row["repo"],
             "pr_number": row["pr_number"],
             "pr_id": row["pr_id"],

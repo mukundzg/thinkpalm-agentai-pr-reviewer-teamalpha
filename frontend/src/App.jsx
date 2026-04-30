@@ -89,6 +89,7 @@ function buildTestFixSuggestions(testOutput) {
 }
 
 export default function App() {
+  const [activeNav, setActiveNav] = useState("review");
   const [form, setForm] = useState({
     pr_id: "",
     repo: "",
@@ -117,7 +118,15 @@ export default function App() {
   const [projectId, setProjectId] = useState(null);
   const [cryptoStatus, setCryptoStatus] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [newProject, setNewProject] = useState({ full_name: "", github_token: "", webhook_secret: "" });
+  const [newProject, setNewProject] = useState({
+    full_name: "",
+    github_token: "",
+    webhook_secret: "",
+    scm_provider: "github",
+    tracker_provider: "",
+    tracker_token: "",
+    tracker_project_key: ""
+  });
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [onboardingStatus, setOnboardingStatus] = useState(null);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
@@ -283,13 +292,13 @@ export default function App() {
   }, [isDecisionModalOpen, decisionHistory?.run?.pr_id]);
 
   useEffect(() => {
-    if (!settingsOpen) {
+    if (activeNav !== "settings") {
       return;
     }
     fetchCryptoStatus()
       .then((s) => setCryptoStatus(s))
       .catch(() => {});
-  }, [settingsOpen]);
+  }, [activeNav]);
 
   function startProgress(action) {
     const profileMap = {
@@ -421,12 +430,24 @@ export default function App() {
       await createProject({
         full_name: newProject.full_name.trim(),
         github_token: newProject.github_token,
-        webhook_secret: newProject.webhook_secret || ""
+        webhook_secret: newProject.webhook_secret || "",
+        scm_provider: newProject.scm_provider || "github",
+        tracker_provider: newProject.tracker_provider || "",
+        tracker_token: newProject.tracker_token || "",
+        tracker_project_key: newProject.tracker_project_key || ""
       });
       const res = await fetchProjects();
       const items = Array.isArray(res?.items) ? res.items : [];
       setProjects(items);
-      setNewProject({ full_name: "", github_token: "", webhook_secret: "" });
+      setNewProject({
+        full_name: "",
+        github_token: "",
+        webhook_secret: "",
+        scm_provider: "github",
+        tracker_provider: "",
+        tracker_token: "",
+        tracker_project_key: ""
+      });
       if (items.length) {
         const id = items[items.length - 1].id;
         setProjectId(id);
@@ -822,7 +843,11 @@ export default function App() {
       await createProject({
         full_name: newProject.full_name.trim(),
         github_token: newProject.github_token,
-        webhook_secret: newProject.webhook_secret || ""
+        webhook_secret: newProject.webhook_secret || "",
+        scm_provider: newProject.scm_provider || "github",
+        tracker_provider: newProject.tracker_provider || "",
+        tracker_token: newProject.tracker_token || "",
+        tracker_project_key: newProject.tracker_project_key || ""
       });
       const projRes = await fetchProjects();
       const items = Array.isArray(projRes?.items) ? projRes.items : [];
@@ -830,7 +855,15 @@ export default function App() {
       const ob = await fetchOnboardingStatus();
       setOnboardingStatus(ob);
       setCryptoStatus(await fetchCryptoStatus());
-      setNewProject({ full_name: "", github_token: "", webhook_secret: "" });
+      setNewProject({
+        full_name: "",
+        github_token: "",
+        webhook_secret: "",
+        scm_provider: "github",
+        tracker_provider: "",
+        tracker_token: "",
+        tracker_project_key: ""
+      });
       if (ob.onboarding_complete) {
         await loadInitialPrForProjects(items);
       }
@@ -885,9 +918,23 @@ export default function App() {
               <h2>First GitHub repository</h2>
               <p className="onboarding-copy">
                 Enter <strong>owner/repo</strong>, your <strong>GitHub token</strong>, and optionally the <strong>webhook secret</strong>{" "}
-                used for <code>/webhook/github</code>. You can add or remove more repositories later under Settings.
+                used for <code>/webhook/github</code>. You can also set tracker credentials now (Jira/Linear/GitHub Issues), and add
+                more integrations later under Project Onboarding.
               </p>
               <form className="onboarding-form" onSubmit={onOnboardingFirstProject}>
+                <div className="form-group">
+                  <label>SCM Provider</label>
+                  <select
+                    value={newProject.scm_provider}
+                    onChange={(e) => setNewProject({ ...newProject, scm_provider: e.target.value })}
+                    disabled={onboardingBusy}
+                  >
+                    <option value="github">GitHub</option>
+                    <option value="gitlab">GitLab</option>
+                    <option value="bitbucket">Bitbucket</option>
+                    <option value="svn">SVN (planned)</option>
+                  </select>
+                </div>
                 <div className="form-group">
                   <label>Repository (owner/repo)</label>
                   <input
@@ -919,6 +966,40 @@ export default function App() {
                     onChange={(e) => setNewProject({ ...newProject, webhook_secret: e.target.value })}
                     placeholder="Must match GitHub webhook configuration for /webhook/github"
                     autoComplete="new-password"
+                    disabled={onboardingBusy}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Tracker Provider (optional)</label>
+                  <select
+                    value={newProject.tracker_provider}
+                    onChange={(e) => setNewProject({ ...newProject, tracker_provider: e.target.value })}
+                    disabled={onboardingBusy}
+                  >
+                    <option value="">None</option>
+                    <option value="jira">Jira</option>
+                    <option value="linear">Linear</option>
+                    <option value="github_issues">GitHub Issues</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Tracker token (optional)</label>
+                  <input
+                    type="password"
+                    value={newProject.tracker_token}
+                    onChange={(e) => setNewProject({ ...newProject, tracker_token: e.target.value })}
+                    placeholder="Tracker API token"
+                    autoComplete="new-password"
+                    disabled={onboardingBusy}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Tracker project key (optional)</label>
+                  <input
+                    value={newProject.tracker_project_key}
+                    onChange={(e) => setNewProject({ ...newProject, tracker_project_key: e.target.value })}
+                    placeholder="e.g. TEAM, ENG, PROJECT-ALPHA"
+                    autoComplete="off"
                     disabled={onboardingBusy}
                   />
                 </div>
@@ -975,29 +1056,18 @@ export default function App() {
               </div>
               <div className="hero-actions">
                 <button
-                  className="btn hero-btn"
-                  onClick={onShowWebhookInbox}
-                  disabled={Boolean(loadingAction) || bootstrapping}
-                >
-                  {loadingAction === "webhook-inbox" ? "Loading PR Inbox..." : "PR Inbox"}
-                </button>
-                <button
-                  className="btn hero-btn"
-                  onClick={onShowPrHistory}
-                  disabled={Boolean(loadingAction) || bootstrapping || !projectId}
-                >
-                  {loadingAction === "pr-history" ? "Loading History..." : "Analysis History"}
-                </button>
-                <button
                   type="button"
                   className="btn btn-settings hero-btn"
                   aria-label="Settings"
-                  title="GitHub projects and credentials"
-                  onClick={() => setSettingsOpen(true)}
+                  title="Project onboarding and integrations"
+                  onClick={() => {
+                    setActiveNav("settings");
+                    setSettingsOpen(true);
+                  }}
                   disabled={bootstrapping}
                 >
                   <span aria-hidden="true" className="btn-settings-icon">⚙</span>
-                  <span>Settings</span>
+                  <span>Project Onboarding</span>
                 </button>
               </div>
             </div>
@@ -1040,6 +1110,52 @@ export default function App() {
 
       <div className="app-shell">
       <aside className="sidebar">
+        <section className="panel">
+          <div className="panel-header">
+            <h3>Workspace Menu</h3>
+          </div>
+          <div className="panel-body">
+            <div className="actions">
+              <button
+                className={`btn ${activeNav === "review" ? "primary" : ""}`}
+                onClick={() => setActiveNav("review")}
+                disabled={Boolean(loadingAction)}
+              >
+                PR Review
+              </button>
+              <button
+                className="btn"
+                onClick={async () => {
+                  setActiveNav("inbox");
+                  await onShowWebhookInbox();
+                }}
+                disabled={Boolean(loadingAction) || bootstrapping}
+              >
+                {loadingAction === "webhook-inbox" ? "Loading..." : "PR Inbox"}
+              </button>
+              <button
+                className="btn"
+                onClick={async () => {
+                  setActiveNav("history");
+                  await onShowPrHistory();
+                }}
+                disabled={Boolean(loadingAction) || bootstrapping || !projectId}
+              >
+                {loadingAction === "pr-history" ? "Loading..." : "Analysis History"}
+              </button>
+              <button
+                className={`btn ${activeNav === "settings" ? "primary" : ""}`}
+                onClick={() => {
+                  setActiveNav("settings");
+                  setSettingsOpen(true);
+                }}
+                disabled={bootstrapping}
+              >
+                Project Onboarding / Settings
+              </button>
+            </div>
+          </div>
+        </section>
         <section className="panel">
           <div className="panel-header">
             <h3>Configuration</h3>
@@ -1122,7 +1238,72 @@ export default function App() {
       </aside>
 
       <main className="main-content">
-        {result ? (
+        {activeNav === "inbox" ? (
+          <section className="panel">
+            <div className="panel-header">
+              <h3>PR Inbox</h3>
+              <button className="btn modal-close" onClick={onShowWebhookInbox} disabled={Boolean(loadingAction)}>
+                Refresh
+              </button>
+            </div>
+            <div className="panel-body">
+              {webhookItems.length === 0 ? (
+                <p style={{ color: "var(--color-fg-muted)" }}>No webhook PR events captured yet.</p>
+              ) : (
+                webhookItems.map((item) => (
+                  <button key={`inbox-${item.id}`} className="pr-row" onClick={() => onPickWebhookItem(item)} disabled={Boolean(loadingAction)}>
+                    <span className="pr-title">
+                      {item.pr_id} <span style={{ color: "var(--color-fg-muted)", fontWeight: 500 }}>| {item.action}</span>
+                    </span>
+                    <span className="pr-meta">
+                      Project #{item.project_id ?? "-"} | Status: {String(item.processed_status || "").toUpperCase()} | Received: {item.received_at || "-"}
+                    </span>
+                    {item.title ? <span className="pr-meta">{item.title}</span> : null}
+                  </button>
+                ))
+              )}
+            </div>
+          </section>
+        ) : activeNav === "history" ? (
+          <section className="panel">
+            <div className="panel-header">
+              <h3>Analysis History</h3>
+              <button className="btn modal-close" onClick={onShowPrHistory} disabled={Boolean(loadingAction) || !projectId}>
+                Refresh
+              </button>
+            </div>
+            <div className="panel-body">
+              {prHistoryItems.length === 0 ? (
+                <p style={{ color: "var(--color-fg-muted)" }}>No analyzed PR history found yet.</p>
+              ) : (
+                prHistoryItems.map((item) => (
+                  <button key={`${item.pr_id}-${item.run_id}`} className="pr-row" onClick={() => onPickHistoryItem(item)}>
+                    <span className="pr-title">{item.pr_id} <span style={{ color: "var(--color-fg-muted)", fontWeight: 500 }}>| Run #{item.run_id}</span></span>
+                    <span className="pr-meta">Status: {formatRunLabel(item.status)} | {renderRunTime(item)}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </section>
+        ) : activeNav === "settings" ? (
+          <section className="panel">
+            <div className="panel-header">
+              <h3>Project Onboarding</h3>
+              <button className="btn modal-close" onClick={() => setSettingsOpen(true)}>
+                Open Full Settings
+              </button>
+            </div>
+            <div className="panel-body">
+              <p style={{ color: "var(--color-fg-muted)", marginBottom: "0.75rem" }}>
+                Configure repository onboarding, SCM provider credentials (GitHub/GitLab/Bitbucket/SVN planned), and tracker integrations
+                (Jira/Linear/GitHub Issues) in the settings interface.
+              </p>
+              <button className="btn primary" onClick={() => setSettingsOpen(true)} disabled={Boolean(loadingAction)}>
+                Manage Integrations
+              </button>
+            </div>
+          </section>
+        ) : result ? (
           <>
             <section className="panel">
               <div className="panel-header">
@@ -1376,6 +1557,19 @@ export default function App() {
               <form className="settings-add-form" onSubmit={onSaveNewProject}>
                 <h4 style={{ fontSize: "0.8rem", margin: "1.25rem 0 0.5rem" }}>Add repository</h4>
                 <div className="form-group">
+                  <label>SCM provider</label>
+                  <select
+                    value={newProject.scm_provider}
+                    onChange={(e) => setNewProject({ ...newProject, scm_provider: e.target.value })}
+                    disabled={settingsBusy}
+                  >
+                    <option value="github">GitHub</option>
+                    <option value="gitlab">GitLab</option>
+                    <option value="bitbucket">Bitbucket</option>
+                    <option value="svn">SVN (planned)</option>
+                  </select>
+                </div>
+                <div className="form-group">
                   <label>Repository (owner/repo)</label>
                   <input
                     value={newProject.full_name}
@@ -1404,6 +1598,40 @@ export default function App() {
                     onChange={(e) => setNewProject({ ...newProject, webhook_secret: e.target.value })}
                     placeholder="Same value as in GitHub webhook settings"
                     autoComplete="new-password"
+                    disabled={settingsBusy}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Tracker provider (optional)</label>
+                  <select
+                    value={newProject.tracker_provider}
+                    onChange={(e) => setNewProject({ ...newProject, tracker_provider: e.target.value })}
+                    disabled={settingsBusy}
+                  >
+                    <option value="">None</option>
+                    <option value="jira">Jira</option>
+                    <option value="linear">Linear</option>
+                    <option value="github_issues">GitHub Issues</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Tracker token (optional)</label>
+                  <input
+                    type="password"
+                    value={newProject.tracker_token}
+                    onChange={(e) => setNewProject({ ...newProject, tracker_token: e.target.value })}
+                    placeholder="Tracker API token"
+                    autoComplete="new-password"
+                    disabled={settingsBusy}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Tracker project key (optional)</label>
+                  <input
+                    value={newProject.tracker_project_key}
+                    onChange={(e) => setNewProject({ ...newProject, tracker_project_key: e.target.value })}
+                    placeholder="e.g. ENG"
+                    autoComplete="off"
                     disabled={settingsBusy}
                   />
                 </div>

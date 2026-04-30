@@ -3,6 +3,7 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from backend.agents.fixer import fix_generator_agent
+from backend.agents.requirements_validator import requirements_validator_agent
 from backend.agents.reviewer import review_agent, review_fast_agent
 from backend.agents.summarizer import summary_agent
 from backend.agents.tester import test_agent
@@ -30,10 +31,12 @@ def build_workflow():
     graph.add_node("reviewer", review_agent)
     graph.add_node("fixer", fix_generator_agent)
     graph.add_node("tester", test_agent)
+    graph.add_node("requirements_validator", requirements_validator_agent)
     graph.add_node("summarizer", summary_agent)
 
     graph.add_edge(START, "reviewer_fast")
-    graph.add_edge("reviewer_fast", "tester")
+    graph.add_edge("reviewer_fast", "requirements_validator")
+    graph.add_edge("requirements_validator", "tester")
     graph.add_edge("reviewer", "fixer")
     graph.add_edge("fixer", "tester")
     graph.add_conditional_edges(

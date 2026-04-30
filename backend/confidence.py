@@ -97,6 +97,20 @@ def _detect_semantic_risk(diff: str) -> dict[str, bool]:
     }
 
 
+def _detect_output_contract_change(diff: str) -> bool:
+    added = [line.lower() for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")]
+    removed = [line.lower() for line in diff.splitlines() if line.startswith("-") and not line.startswith("---")]
+    contract_tokens = ("return ", "response", "json", "payload", "schema", "dict(", "{", "status")
+    added_hit = any(any(token in line for token in contract_tokens) for line in added)
+    removed_hit = any(any(token in line for token in contract_tokens) for line in removed)
+    return added_hit and removed_hit
+
+
+def _has_downstream_test_evidence(paths: list[str]) -> bool:
+    lower = [p.lower() for p in paths]
+    return any(("/test" in p or p.startswith("test") or p.endswith("_test.py") or p.endswith(".spec.ts")) for p in lower)
+
+
 def _build_signals(state: WorkflowState) -> dict[str, Any]:
     issues = state.issues or []
     diff = state.review_input.diff or ""
@@ -104,6 +118,8 @@ def _build_signals(state: WorkflowState) -> dict[str, Any]:
     paths = _extract_changed_paths(diff, state.review_input.changed_files)
     semantic = _detect_semantic_risk(diff)
     business_logic_change = any(_is_business_logic_file(path) for path in paths)
+    output_contract_change = _detect_output_contract_change(diff)
+    downstream_test_evidence = _has_downstream_test_evidence(paths)
     return {
         "test_pass": bool(state.test_output and state.test_output.status == "pass"),
         "issue_count": len(issues),
@@ -115,6 +131,8 @@ def _build_signals(state: WorkflowState) -> dict[str, Any]:
         "changed_files": _count_changed_files(diff, state.review_input.changed_files),
         "llm_ok": bool(state.metadata.get("review_model_raw")),
         "business_logic_change": business_logic_change,
+        "output_contract_change": output_contract_change,
+        "downstream_test_evidence": downstream_test_evidence,
         "operator_mutation": semantic["operator_mutation"],
         "arithmetic_mutation": semantic["arithmetic_mutation"],
         "control_flow_mutation": semantic["control_flow_mutation"],
@@ -144,6 +162,8 @@ def compute_confidence_from_signals(signals: dict[str, Any]) -> float:
         + 0.10 * churn_component
         + 0.10 * files_component
     )
+    if signals.get("output_contract_change") and not signals.get("downstream_test_evidence"):
+        score -= 0.15
     return max(0.0, min(1.0, score))
 
 
@@ -153,13 +173,20 @@ def annotate_workflow_confidence(state: WorkflowState) -> float:
     semantic_risk = bool(
         signals["operator_mutation"] or signals["arithmetic_mutation"] or signals["control_flow_mutation"] or signals["conditional_flip"]
     )
+    if signals["output_contract_change"] and not signals["downstream_test_evidence"]:
+        semantic_risk = True
     # Keep this adaptive threshold explicit for router logic.
     threshold = 0.4 if (signals["arithmetic_mutation"] or signals["control_flow_mutation"]) else 0.5
+    if signals["output_contract_change"] and not signals["downstream_test_evidence"]:
+        threshold = min(0.6, threshold + 0.1)
     state.metadata["confidence_signals"] = signals
     state.metadata["confidence_score"] = score
     state.metadata["confidence_pct"] = round(score * 100.0, 1)
     state.metadata["semantic_risk"] = semantic_risk
     state.metadata["business_logic_change"] = bool(signals["business_logic_change"])
+    state.metadata["requires_downstream_validation"] = bool(
+        signals["output_contract_change"] and not signals["downstream_test_evidence"]
+    )
     state.metadata["confidence_threshold"] = threshold
     return score
 

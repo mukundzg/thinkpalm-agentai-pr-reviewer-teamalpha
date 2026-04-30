@@ -6,6 +6,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.integrations.base import PullRequestData
 
 
 def _signature(body: bytes, secret: str) -> str:
@@ -37,19 +38,25 @@ def test_webhook_accepts_valid_signature_and_dedupes(monkeypatch):
 
     import backend.main as main_module
 
-    def fake_fetch(repo, pr, token=None):
-        return {
-            "files": [{"filename": "a.py", "patch": "@@ -1 +1 @@\n-print(1)\n+print(2)"}],
-            "combined_diff": "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-print(1)\n+print(2)",
-            "title": "demo",
-        }
+    class FakeScm:
+        def fetch_pull_request(self, *, repo, pr_number, token):
+            return PullRequestData(
+                provider="github",
+                repo=repo,
+                pr_number=pr_number,
+                title="demo",
+                diff="diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-print(1)\n+print(2)",
+                changed_files=[{"filename": "a.py", "patch": "@@ -1 +1 @@\n-print(1)\n+print(2)"}],
+            )
+
+        def post_comment(self, *, repo, pr_number, body, token):
+            return None
 
     def fake_run(review_input, project_id=None):
         return {"final_comment": "ok", "review_input": review_input.model_dump()}
 
-    monkeypatch.setattr(main_module, "fetch_pr_file_patches", fake_fetch)
+    monkeypatch.setattr(main_module.provider_registry, "get_scm", lambda key: FakeScm())
     monkeypatch.setattr(main_module, "_run_review", fake_run)
-    monkeypatch.setattr(main_module, "post_pr_comment", lambda *args, **kwargs: None)
     main_module.processed_deliveries.clear()
 
     client = TestClient(app)
@@ -78,15 +85,18 @@ def test_webhook_accepts_form_encoded_payload(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "fake-token-for-tests")
     import backend.main as main_module
 
-    def fake_fetch(repo, pr, token=None):
-        return {"files": [], "combined_diff": "", "title": "demo"}
+    class FakeScm:
+        def fetch_pull_request(self, *, repo, pr_number, token):
+            return PullRequestData(provider="github", repo=repo, pr_number=pr_number, title="demo", diff="", changed_files=[])
+
+        def post_comment(self, *, repo, pr_number, body, token):
+            return None
 
     def fake_run(review_input, project_id=None):
         return {"final_comment": "ok", "review_input": review_input.model_dump()}
 
-    monkeypatch.setattr(main_module, "fetch_pr_file_patches", fake_fetch)
+    monkeypatch.setattr(main_module.provider_registry, "get_scm", lambda key: FakeScm())
     monkeypatch.setattr(main_module, "_run_review", fake_run)
-    monkeypatch.setattr(main_module, "post_pr_comment", lambda *args, **kwargs: None)
 
     client = TestClient(app)
     payload = {
