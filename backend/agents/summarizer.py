@@ -16,6 +16,7 @@ def summary_agent(state: WorkflowState) -> WorkflowState:
             "### 🔍 Review Summary",
             f"- Found {len(issues)} issues",
             f"- Auto-fix attempts: {state.attempts}",
+            f"- Requirement coverage: {float(state.metadata.get('requirement_coverage', 1.0) or 0.0):.2f}",
             "",
             "### ✅ Suggested Fix",
             "```diff",
@@ -30,6 +31,8 @@ def summary_agent(state: WorkflowState) -> WorkflowState:
 Format a clean GitHub PR comment using this data:
 - Issues: {[i.model_dump() for i in issues]}
 - Auto-fix attempts: {state.attempts}
+- Requirement coverage: {state.metadata.get("requirement_coverage", 1.0)}
+- Unmet requirements: {state.metadata.get("unmet_requirements", [])}
 - Patch:
 {diff_snippet[:3000]}
 - Explanation: {fixed.changes_explained if fixed else 'no fix output'}

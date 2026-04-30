@@ -60,7 +60,19 @@ def fetch_pr_file_patches(repo_name: str, pr_number: int, *, token: str | None =
         if patch:
             patch_blocks.append(f"diff --git a/{f.filename} b/{f.filename}\n{patch}")
 
-    return {"files": files_payload, "combined_diff": "\n".join(patch_blocks), "title": pr.title or ""}
+    linked_ticket_ids: list[str] = []
+    if pr.body:
+        for token in str(pr.body).split():
+            if token.startswith("#") and token[1:].isdigit():
+                linked_ticket_ids.append(token)
+    return {
+        "files": files_payload,
+        "combined_diff": "\n".join(patch_blocks),
+        "title": pr.title or "",
+        "branch_name": pr.head.ref if pr.head else "",
+        "linked_ticket_ids": linked_ticket_ids,
+    }
+    
 
 
 def fetch_open_prs(repo_name: str, limit: int = 20, *, token: str | None = None) -> list[dict[str, Any]]:

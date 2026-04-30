@@ -43,6 +43,10 @@ def test_agent(state: WorkflowState) -> WorkflowState:
                 {"signal_type": "command", "signal_value": test_output.command or ""},
                 {"signal_type": "confidence_score", "signal_value": score},
                 {"signal_type": "confidence_pct", "signal_value": confidence_pct},
+                {
+                    "signal_type": "requires_downstream_validation",
+                    "signal_value": bool(state.metadata.get("requires_downstream_validation", False)),
+                },
             ],
             policy_checks=[
                 {"policy_name": "verification_loop", "result": "PASS", "notes": "Executed sandbox tests after fix."},
@@ -50,6 +54,15 @@ def test_agent(state: WorkflowState) -> WorkflowState:
                     "policy_name": "retry_budget",
                     "result": "PASS" if state.attempts <= state.max_attempts else "FAIL",
                     "notes": f"attempts={state.attempts}, max={state.max_attempts}",
+                },
+                {
+                    "policy_name": "downstream_contract_validation",
+                    "result": "WARN" if state.metadata.get("requires_downstream_validation", False) else "PASS",
+                    "notes": (
+                        "Output contract changed without downstream test evidence."
+                        if state.metadata.get("requires_downstream_validation", False)
+                        else "No downstream contract validation gap detected."
+                    ),
                 },
             ],
             retry_state={

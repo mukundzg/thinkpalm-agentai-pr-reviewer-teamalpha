@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from backend.dotenv_util import upsert_app_secret_key_line
+from backend.integrations import provider_registry, register_default_providers, resolve_ticket_ids
 from backend.preflight import get_preflight_snapshot, run_startup_preflight
 from backend.graph.workflow import build_workflow
 from backend.models import ReviewInput, WorkflowState
@@ -23,6 +24,8 @@ from backend.sqlite_store import (
     complete_agent_run,
     create_agent_run,
     delete_github_project,
+    get_integration_row_by_full_name,
+    get_integration_row_by_id,
     get_analysis_history,
     get_decision_run_by_id,
     get_githubproject_row_by_full_name,
@@ -33,6 +36,7 @@ from backend.sqlite_store import (
     get_review_result,
     insert_github_project,
     init_db,
+    insert_integration,
     list_projects_public,
     list_webhook_pr_events,
     log_webhook_pr_event,
@@ -57,6 +61,7 @@ app.add_middleware(
 workflow = build_workflow()
 processed_deliveries: set[str] = set()
 init_db()
+register_default_providers()
 run_startup_preflight()
 
 
@@ -72,6 +77,8 @@ class ManualReviewPayload(BaseModel):
     pr_number: int
     title: str = ""
     diff: str
+    scm_provider: str = "github"
+    tracker_provider: str = ""
 
 
 class PostCommentPayload(BaseModel):
@@ -79,12 +86,14 @@ class PostCommentPayload(BaseModel):
     repo: str
     pr_number: int
     body: str
+    scm_provider: str = "github"
 
 
 class ApprovePrPayload(BaseModel):
     project_id: int
     repo: str
     pr_number: int
+    scm_provider: str = "github"
 
 
 class PrActionPayload(BaseModel):
@@ -93,6 +102,7 @@ class PrActionPayload(BaseModel):
     pr_number: int
     action_type: str
     action_status: str = "success"
+    provider: str = "github"
     actor: str = "user"
     details: str = ""
     run_id: int | None = None
@@ -102,14 +112,27 @@ class CreateProjectPayload(BaseModel):
     full_name: str = Field(..., description="owner/repo")
     github_token: str
     webhook_secret: str = ""
+    scm_provider: str = "github"
+    tracker_provider: str = ""
+    tracker_token: str = ""
+    tracker_project_key: str = ""
 
 
 class UpdateProjectPayload(BaseModel):
     github_token: str | None = None
     webhook_secret: str | None = None
+    tracker_provider: str | None = None
+    tracker_token: str | None = None
+    tracker_project_key: str | None = None
 
 
 def _token_for_repo_full_name(full_name: str) -> str:
+    integration = get_integration_row_by_full_name(full_name, "github")
+    if integration and (integration.get("scm_token_encrypted") or "").strip():
+        try:
+            return decrypt_secret(integration["scm_token_encrypted"])
+        except SecretKeyError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
     row = get_githubproject_row_by_full_name(full_name)
     if row and (row.get("github_token_encrypted") or "").strip():
         try:
@@ -126,6 +149,12 @@ def _token_for_repo_full_name(full_name: str) -> str:
 
 
 def resolve_token_for_project_id(project_id: int) -> str:
+    integration = get_integration_row_by_id(project_id)
+    if integration and (integration.get("scm_token_encrypted") or "").strip():
+        try:
+            return decrypt_secret(integration["scm_token_encrypted"])
+        except SecretKeyError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
     row = get_githubproject_row_by_id(project_id)
     if not row:
         raise HTTPException(status_code=404, detail="Project not found.")
@@ -139,6 +168,12 @@ def resolve_token_for_project_id(project_id: int) -> str:
 
 
 def _webhook_secret_for_repo(full_name: str) -> str | None:
+    integration = get_integration_row_by_full_name(full_name, "github")
+    if integration and (integration.get("webhook_secret_encrypted") or "").strip():
+        try:
+            return decrypt_secret(integration["webhook_secret_encrypted"])
+        except SecretKeyError:
+            return None
     row = get_githubproject_row_by_full_name(full_name.strip())
     if row and (row.get("webhook_secret_encrypted") or "").strip():
         try:
@@ -195,6 +230,83 @@ def _parse_github_event(raw_body: bytes, content_type: str | None) -> dict[str, 
         return json.loads(body_text)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid webhook JSON payload: {exc.msg}") from exc
+
+
+def _resolve_tracker_token(project_id: int | None) -> str:
+    if project_id is None:
+        return ""
+    row = get_integration_row_by_id(project_id)
+    if not row:
+        return ""
+    enc = row.get("tracker_token_encrypted") or ""
+    if not enc.strip():
+        return ""
+    try:
+        return decrypt_secret(enc)
+    except SecretKeyError:
+        return ""
+
+
+def _should_fetch_full_tracker_context(review_input: ReviewInput) -> tuple[bool, str]:
+    diff = (review_input.diff or "").lower()
+    changed_files = [str(item.get("filename", "")).lower() for item in (review_input.changed_files or []) if isinstance(item, dict)]
+    only_docs_or_tests = bool(changed_files) and all(
+        ("/test" in p or p.startswith("test") or p.endswith(".md") or "/docs/" in p or p.startswith("docs/"))
+        for p in changed_files
+    )
+    if only_docs_or_tests:
+        return False, "docs_or_tests_only"
+    high_impact_tokens = ("return ", "response", "schema", "payload", "api", "contract", "break", "fix")
+    if any(token in diff for token in high_impact_tokens):
+        return True, "behavior_or_contract_change"
+    # Default to lightweight gating; full context only when behavior signals exist.
+    return False, "low_impact_change"
+
+
+def _enrich_review_input_with_requirements(review_input: ReviewInput, project_id: int | None) -> ReviewInput:
+    ticket_ids, linking_meta = resolve_ticket_ids(
+        linked_ids=list(review_input.linked_ticket_ids or []),
+        pr_title=review_input.title,
+        branch_name=str(review_input.scm_context.get("branch_name", "")),
+    )
+    review_input.linking_metadata = linking_meta
+    review_input.linked_ticket_ids = ticket_ids
+
+    if not review_input.tracker_provider or not ticket_ids:
+        return review_input
+    fetch_full, reason = _should_fetch_full_tracker_context(review_input)
+    review_input.linking_metadata["context_mode"] = "full" if fetch_full else "light"
+    review_input.linking_metadata["context_gate_reason"] = reason
+    if not fetch_full:
+        # Keep ticket IDs for traceability, but avoid pulling heavy ticket context for low-impact changes.
+        return review_input
+
+    tracker = provider_registry.get_tracker(review_input.tracker_provider)
+    tracker_token = _resolve_tracker_token(project_id)
+    requirements: list[str] = []
+    ticket_context: list[dict[str, Any]] = []
+    for ticket_id in ticket_ids:
+        ticket = tracker.fetch_ticket(
+            ticket_id=ticket_id,
+            token=tracker_token,
+            project_hint=str(review_input.scm_context.get("repo", review_input.repo)),
+        )
+        if not ticket:
+            continue
+        ticket_context.append(
+            {
+                "provider": ticket.provider,
+                "ticket_id": ticket.ticket_id,
+                "title": ticket.title,
+                "description": ticket.description,
+                "acceptance_criteria": ticket.acceptance_criteria,
+                "metadata": ticket.metadata,
+            }
+        )
+        requirements.extend(ticket.acceptance_criteria)
+    review_input.ticket_context = ticket_context
+    review_input.requirements = requirements
+    return review_input
 
 
 @app.get("/settings/crypto-status")
@@ -271,10 +383,23 @@ async def create_project(payload: CreateProjectPayload):
     try:
         tok_e = encrypt_secret(payload.github_token.strip())
         wh_e = encrypt_secret(payload.webhook_secret.strip()) if payload.webhook_secret.strip() else ""
+        tracker_tok_e = encrypt_secret(payload.tracker_token.strip()) if payload.tracker_token.strip() else ""
     except SecretKeyError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     try:
         pid = insert_github_project(full_name=fn, github_token_encrypted=tok_e, webhook_secret_encrypted=wh_e)
+        try:
+            insert_integration(
+                full_name=fn,
+                scm_provider=payload.scm_provider.strip().lower() or "github",
+                scm_token_encrypted=tok_e,
+                webhook_secret_encrypted=wh_e,
+                tracker_provider=payload.tracker_provider.strip().lower(),
+                tracker_token_encrypted=tracker_tok_e,
+                tracker_project_key=payload.tracker_project_key.strip(),
+            )
+        except sqlite3.IntegrityError:
+            pass
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="A project with this full_name already exists.") from exc
     return {"status": "ok", "id": pid, "full_name": fn}
@@ -355,12 +480,17 @@ async def github_webhook(
         changed_files=[],
         base_sha=pull_request.get("base", {}).get("sha"),
         head_sha=pull_request.get("head", {}).get("sha"),
+        scm_provider="github",
     )
     proj_row = get_githubproject_row_by_full_name(review_input.repo)
     project_id = int(proj_row["id"]) if proj_row else None
+    integration_row = get_integration_row_by_full_name(review_input.repo, "github")
+    if integration_row and integration_row.get("tracker_provider"):
+        review_input.tracker_provider = str(integration_row.get("tracker_provider") or "")
     event_id = log_webhook_pr_event(
         delivery_id=x_github_delivery,
         project_id=project_id,
+        provider=review_input.scm_provider,
         repo=review_input.repo,
         pr_number=review_input.pr_number,
         pr_id=review_input.pr_id,
@@ -372,12 +502,16 @@ async def github_webhook(
     )
     token = _token_for_repo_full_name(review_input.repo)
     try:
-        parsed = fetch_pr_file_patches(review_input.repo, review_input.pr_number, token=token)
-        review_input.diff = parsed.get("combined_diff", "") or ""
-        review_input.changed_files = parsed.get("files", []) or []
-        review_input.title = parsed.get("title", review_input.title)
+        scm = provider_registry.get_scm(review_input.scm_provider)
+        parsed = scm.fetch_pull_request(repo=review_input.repo, pr_number=review_input.pr_number, token=token)
+        review_input.diff = parsed.diff or ""
+        review_input.changed_files = parsed.changed_files
+        review_input.title = parsed.title or review_input.title
+        review_input.scm_context = {"repo": parsed.repo, "branch_name": parsed.branch_name}
+        review_input.linked_ticket_ids = parsed.linked_ticket_ids
     except Exception:
         review_input.diff = pull_request.get("body", "") or ""
+    review_input = _enrich_review_input_with_requirements(review_input, project_id)
     try:
         output = _run_review(review_input, project_id=project_id)
         update_webhook_pr_event_status(event_id, "processed")
@@ -385,11 +519,17 @@ async def github_webhook(
         update_webhook_pr_event_status(event_id, "failed")
         raise
     try:
-        post_pr_comment(review_input.repo, review_input.pr_number, output.get("final_comment", ""), token=token)
+        provider_registry.get_scm(review_input.scm_provider).post_comment(
+            repo=review_input.repo,
+            pr_number=review_input.pr_number,
+            body=output.get("final_comment", ""),
+            token=token,
+        )
         log_pr_action(
             pr_id=review_input.pr_id,
             repo=review_input.repo,
             pr_number=review_input.pr_number,
+            provider=review_input.scm_provider,
             action_type="comment_added",
             action_status="success",
             actor="system",
@@ -401,6 +541,7 @@ async def github_webhook(
             pr_id=review_input.pr_id,
             repo=review_input.repo,
             pr_number=review_input.pr_number,
+            provider=review_input.scm_provider,
             action_type="comment_added",
             action_status="failed",
             actor="system",
@@ -423,9 +564,15 @@ async def manual_review(payload: ManualReviewPayload):
     data = payload.model_dump()
     data.pop("project_id", None)
     review_input = ReviewInput(**data)
+    review_input.scm_provider = payload.scm_provider.strip().lower() or "github"
+    review_input.tracker_provider = payload.tracker_provider.strip().lower()
+    integration_row = get_integration_row_by_id(payload.project_id)
+    if integration_row and not review_input.tracker_provider:
+        review_input.tracker_provider = str(integration_row.get("tracker_provider") or "")
     if review_input.repo != row["full_name"]:
         raise HTTPException(status_code=400, detail="repo must match the selected project's full name.")
     resolve_token_for_project_id(payload.project_id)
+    review_input = _enrich_review_input_with_requirements(review_input, payload.project_id)
     output = _run_review(review_input, project_id=payload.project_id)
     return {"status": "ok", "result": output}
 
@@ -446,11 +593,13 @@ async def publish_pr_comment(payload: PostCommentPayload):
         raise HTTPException(status_code=400, detail="repo does not match the selected project.")
 
     token = resolve_token_for_project_id(payload.project_id)
-    post_pr_comment(repo_name, payload.pr_number, comment_body, token=token)
+    scm_provider = payload.scm_provider.strip().lower() or "github"
+    provider_registry.get_scm(scm_provider).post_comment(repo=repo_name, pr_number=payload.pr_number, body=comment_body, token=token)
     log_pr_action(
         pr_id=f"{repo_name}#{payload.pr_number}",
         repo=repo_name,
         pr_number=payload.pr_number,
+        provider=scm_provider,
         action_type="comment_added",
         action_status="success",
         actor="user",
@@ -473,13 +622,19 @@ async def approve_pr(payload: ApprovePrPayload):
         raise HTTPException(status_code=400, detail="repo does not match the selected project.")
 
     token = resolve_token_for_project_id(payload.project_id)
+    scm_provider = payload.scm_provider.strip().lower() or "github"
     try:
-        approve_pull_request(repo_name, payload.pr_number, token=token)
+        provider_registry.get_scm(scm_provider).approve_pull_request(
+            repo=repo_name,
+            pr_number=payload.pr_number,
+            token=token,
+        )
     except Exception as exc:
         log_pr_action(
             pr_id=f"{repo_name}#{payload.pr_number}",
             repo=repo_name,
             pr_number=payload.pr_number,
+            provider=scm_provider,
             action_type="pr_approved",
             action_status="failed",
             actor="user",
@@ -492,6 +647,7 @@ async def approve_pr(payload: ApprovePrPayload):
         pr_id=f"{repo_name}#{payload.pr_number}",
         repo=repo_name,
         pr_number=payload.pr_number,
+        provider=scm_provider,
         action_type="pr_approved",
         action_status="success",
         actor="user",
@@ -516,6 +672,7 @@ async def record_pr_action(payload: PrActionPayload):
         pr_id=f"{repo_name}#{payload.pr_number}",
         repo=repo_name,
         pr_number=payload.pr_number,
+        provider=payload.provider.strip().lower() or "github",
         action_type=action_type,
         action_status=action_status,
         actor=payload.actor.strip() or "user",

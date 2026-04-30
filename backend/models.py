@@ -25,6 +25,13 @@ class ReviewInput(BaseModel):
     changed_files: list[dict[str, Any]] = Field(default_factory=list)
     base_sha: str | None = None
     head_sha: str | None = None
+    scm_provider: str = "github"
+    tracker_provider: str = ""
+    linked_ticket_ids: list[str] = Field(default_factory=list)
+    requirements: list[str] = Field(default_factory=list)
+    ticket_context: list[dict[str, Any]] = Field(default_factory=list)
+    linking_metadata: dict[str, Any] = Field(default_factory=dict)
+    scm_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class FixOutput(BaseModel):
